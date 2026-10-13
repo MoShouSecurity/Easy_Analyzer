@@ -1,5 +1,7 @@
 # Easy Analyzer
 
+**简体中文** | [English](README.en.md)
+
 **把日志、进程快照和抓包证据放进一个案件，筛查线索、核对原文、保存分析过程。**
 
 Easy Analyzer 是使用 Rust 开发的跨平台应急响应分析工具，提供命令行 CLI 和桌面 GUI。支持 Windows x64、Linux x64、macOS ARM64，适合离线证据分析、现场排查和多天续办的应急响应工作。
