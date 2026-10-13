@@ -38,6 +38,7 @@ import {
   FolderOpen,
   SlidersHorizontal,
   History,
+  Terminal,
 } from "lucide-react";
 import type { ColumnDef } from "@tanstack/react-table";
 import { api } from "./lib/api";
@@ -46,10 +47,12 @@ import {
   defaultFilters,
   evidenceScreen,
   screens,
+  sessionScreens,
   titles,
   statusLabel,
   severityLabel,
   type Screen,
+  type SessionScreen,
   type ProjectInfo,
   type Bootstrap,
   type ViewResponse,
@@ -86,8 +89,10 @@ import {
   newProject,
 } from "./components/ProjectView";
 import { IocView } from "./components/IocView";
+import { CommandsView } from "./components/CommandsView";
 const icons = {
   projects: FolderOpen,
+  commands: Terminal,
   ioc: ShieldCheck,
   import: Upload,
   overview: LayoutDashboard,
@@ -100,6 +105,7 @@ const icons = {
 };
 const hints: Record<Screen, string> = {
   projects: "每次应急响应独立保存，继续已有项目或新建项目",
+  commands: "查看与复制常用排查、取证命令",
   ioc: "导入、粘贴或手动输入 IOC，在当前项目中查找待核查线索",
   import: "汇集离线证据，开始本地分析",
   overview: "从发现追溯证据，核查每一条线索",
@@ -135,10 +141,9 @@ const draftOf = (c: Bootstrap["config"]): ConfigInput => ({
   key_value: "",
 });
 const initialFilters = () =>
-  Object.fromEntries(screens.map((s) => [s, defaultFilters()])) as Record<
-    Screen,
-    Filters
-  >;
+  Object.fromEntries(
+    sessionScreens.map((s) => [s, defaultFilters()]),
+  ) as Record<SessionScreen, Filters>;
 const statusText: Record<string, string> = {
   running: "处理中",
   cancelling: "正在取消，等待当前请求返回",
@@ -148,12 +153,12 @@ const statusText: Record<string, string> = {
   failed: "处理失败",
 };
 interface ScopeContext {
-  screen: Screen;
+  screen: SessionScreen;
   filters: Filters;
 }
 interface Bookmark {
-  screen: Screen;
-  filters: Record<Screen, Filters>;
+  screen: SessionScreen;
+  filters: Record<SessionScreen, Filters>;
   finding: Finding | null;
   detail: DetailResponse | null;
   selectedId: string | null;
@@ -249,7 +254,7 @@ export function App() {
   taskRef.current = task;
   const data = views[screen],
     overview = data?.overview || lastView?.overview,
-    active = filters[screen],
+    active = screen === "commands" ? defaultFilters() : filters[screen],
     hasSession = boot?.session_id !== null && !!boot,
     busy = !!task || elevationBusy || aiSending || aiFilterBusy,
     narrow = width < 1200,
@@ -257,12 +262,19 @@ export function App() {
   const refresh = useCallback(
     async (
       next: Screen = currentScreen.current,
-      filter: Filters = currentFilters.current[next],
+      filter?: Filters,
       focusId: string | null = null,
       commit = true,
     ) => {
       const sid = session.current;
-      if (sid === null || next === "projects" || next === "ioc") return;
+      if (
+        sid === null ||
+        next === "projects" ||
+        next === "ioc" ||
+        next === "commands"
+      )
+        return;
+      filter ??= currentFilters.current[next];
       const revision = ++viewRevision.current;
       setLoading(true);
       try {
@@ -389,7 +401,11 @@ export function App() {
             setBack([]);
             scopeContext.current = null;
             const next =
-              value.kind === "project_create" ? "import" : "overview";
+              currentScreen.current === "commands"
+                ? "commands"
+                : value.kind === "project_create"
+                  ? "import"
+                  : "overview";
             setScreen(next);
             await refreshRef.current(next, defaultFilters(), null, false);
           } else if (fresh.session_id !== null) {
@@ -401,7 +417,7 @@ export function App() {
                       key,
                       { ...filter, flow: null },
                     ]),
-                  ) as Record<Screen, Filters>,
+                  ) as Record<SessionScreen, Filters>,
               );
               setAiFilter(null);
               setAiPreview(null);
@@ -415,7 +431,9 @@ export function App() {
             }
             await refreshRef.current(
               currentScreen.current,
-              currentFilters.current[currentScreen.current],
+              currentScreen.current === "commands"
+                ? undefined
+                : currentFilters.current[currentScreen.current],
               value.kind === "import" ? null : currentFocus.current,
               evidenceScreen(currentScreen.current) &&
                 (value.kind === "import" || !currentFocus.current),
@@ -531,10 +549,19 @@ export function App() {
   }, []);
   useEffect(() => {
     if (session.current !== null)
-      void refresh(screen, filters[screen], focus, focus === null);
+      void refresh(
+        screen,
+        screen === "commands" ? undefined : filters[screen],
+        focus,
+        focus === null,
+      );
   }, [screen, sourceOffset, diagnosticOffset, runOffset]);
   const navigate = (next: Screen) => {
     if (next === screen) return;
+    if (next === "commands" || screen === "commands") {
+      viewRevision.current++;
+      setLoading(false);
+    }
     detailRevision.current++;
     setScreen(next);
     setSelectedSource(null);
@@ -547,6 +574,7 @@ export function App() {
     setDrawer(false);
   };
   const changeFilters = (patch: Partial<Filters>, reset = true) => {
+    if (screen === "commands") return;
     const updated = { ...active, ...patch, ...(reset ? { offset: 0 } : {}) };
     setFilters((v) => ({ ...v, [screen]: updated }));
     setFocus(null);
@@ -662,6 +690,7 @@ export function App() {
     }
   };
   const selectRecord = async (id: string, jump = false) => {
+    if (screen === "commands") return;
     const sid = session.current;
     if (sid === null) return;
     if (jump)
@@ -691,7 +720,7 @@ export function App() {
         return;
       setDetail(result);
       if (jump) {
-        const next: Screen =
+        const next: SessionScreen =
           result.record.data.kind === "log"
             ? "logs"
             : result.record.data.kind === "process"
@@ -1497,38 +1526,40 @@ export function App() {
         </header>
         <div className="workbench">
           <aside className="sidebar">
-            <div className="sidebar-section">工作台</div>
-            {screens
-              .filter((s) => s !== "settings")
-              .map((s) => {
-                const Icon = icons[s];
-                return (
-                  <div key={s}>
-                    {s === "import" && (
-                      <div className="sidebar-section">证据</div>
-                    )}
-                    {s === "processes" && (
-                      <div className="sidebar-section">分析与输出</div>
-                    )}
-                    <Tooltip text={titles[s]}>
-                      <button
-                        className={`nav-item ${screen === s ? "active" : ""}`}
-                        aria-label={titles[s]}
-                        aria-current={screen === s ? "page" : undefined}
-                        onClick={() => navigate(s)}
-                      >
-                        <Icon size={16} strokeWidth={1.7} />
-                        <span>{titles[s]}</span>
-                        {s === "overview" && overview && (
-                          <small>
-                            {overview.local_findings + overview.ai_findings}
-                          </small>
-                        )}
-                      </button>
-                    </Tooltip>
-                  </div>
-                );
-              })}
+            <div className="sidebar-navigation">
+              <div className="sidebar-section">工作台</div>
+              {screens
+                .filter((s) => s !== "settings")
+                .map((s) => {
+                  const Icon = icons[s];
+                  return (
+                    <div key={s}>
+                      {s === "import" && (
+                        <div className="sidebar-section">证据</div>
+                      )}
+                      {s === "processes" && (
+                        <div className="sidebar-section">分析与输出</div>
+                      )}
+                      <Tooltip text={titles[s]}>
+                        <button
+                          className={`nav-item ${screen === s ? "active" : ""}`}
+                          aria-label={titles[s]}
+                          aria-current={screen === s ? "page" : undefined}
+                          onClick={() => navigate(s)}
+                        >
+                          <Icon size={16} strokeWidth={1.7} />
+                          <span>{titles[s]}</span>
+                          {s === "overview" && overview && (
+                            <small>
+                              {overview.local_findings + overview.ai_findings}
+                            </small>
+                          )}
+                        </button>
+                      </Tooltip>
+                    </div>
+                  );
+                })}
+            </div>
             <div className="sidebar-bottom">
               {hasSession && (
                 <div className="sidebar-session">
@@ -1575,7 +1606,7 @@ export function App() {
             <div className="page-heading">
               <div>
                 <div className="title-line">
-                  {back.length > 0 && (
+                  {screen !== "commands" && back.length > 0 && (
                     <Button
                       variant="ghost"
                       size="icon"
@@ -1590,31 +1621,33 @@ export function App() {
                 </div>
                 <p>{hints[screen]}</p>
               </div>
-              <Tooltip
-                text={
-                  narrow
-                    ? "打开证据详情"
-                    : prefs.inspector
-                      ? "收起详情"
-                      : "展开详情"
-                }
-              >
-                <Button
-                  variant="ghost"
-                  size="icon"
-                  aria-label="切换详情"
-                  onClick={() =>
+              {screen !== "commands" && (
+                <Tooltip
+                  text={
                     narrow
-                      ? setDrawer(true)
-                      : void updatePreferences({
-                          ...prefs,
-                          inspector: !prefs.inspector,
-                        })
+                      ? "打开证据详情"
+                      : prefs.inspector
+                        ? "收起详情"
+                        : "展开详情"
                   }
                 >
-                  <PanelRight size={17} />
-                </Button>
-              </Tooltip>
+                  <Button
+                    variant="ghost"
+                    size="icon"
+                    aria-label="切换详情"
+                    onClick={() =>
+                      narrow
+                        ? setDrawer(true)
+                        : void updatePreferences({
+                            ...prefs,
+                            inspector: !prefs.inspector,
+                          })
+                    }
+                  >
+                    <PanelRight size={17} />
+                  </Button>
+                </Tooltip>
+              )}
             </div>
             {error && (
               <div className="error-banner">
@@ -1628,6 +1661,7 @@ export function App() {
             <div
               className={`page-body ${screen === "ai" ? "ai-page-body" : ""}`}
             >
+              {screen === "commands" && <CommandsView />}
               {screen === "projects" && (
                 <ProjectHome
                   busy={busy}
@@ -2311,7 +2345,7 @@ export function App() {
               )}
             </div>
           </main>
-          {!narrow && prefs.inspector && (
+          {screen !== "commands" && !narrow && prefs.inspector && (
             <aside className="inspector">
               <div
                 className="inspector-resize"
@@ -2386,7 +2420,7 @@ export function App() {
         </footer>
         <Dialog
           drawer
-          open={narrow && drawer}
+          open={screen !== "commands" && narrow && drawer}
           onOpenChange={setDrawer}
           title="证据详情"
         >

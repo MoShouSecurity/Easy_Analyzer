@@ -255,6 +255,12 @@ small {
   color: var(--muted);
   letter-spacing: 0.5px;
 }
+.sidebar-navigation {
+  flex: 1;
+  min-height: 0;
+  overflow-y: auto;
+  overflow-x: hidden;
+}
 .nav-item {
   display: flex;
   align-items: center;
@@ -289,6 +295,7 @@ small {
 }
 .sidebar-bottom {
   margin-top: auto;
+  flex-shrink: 0;
 }
 .sidebar-session {
   margin: 14px 3px 12px;
@@ -354,6 +361,134 @@ small {
   flex: 1;
   min-height: 0;
   min-width: 0;
+}
+.commands-view,
+.commands-view .tabs-root,
+.commands-content {
+  display: flex;
+  flex-direction: column;
+  flex: 1;
+  min-width: 0;
+  min-height: 0;
+}
+.commands-view .tabs-root,
+.commands-content {
+  gap: 12px;
+}
+.commands-view .tabs-list,
+.commands-controls,
+.commands-environment {
+  flex-shrink: 0;
+}
+.commands-controls {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 10px;
+  align-items: center;
+}
+.commands-search {
+  flex: 1;
+  min-width: 230px;
+}
+.commands-search button {
+  display: flex;
+  color: var(--muted);
+}
+.commands-count,
+.commands-environment,
+.command-category {
+  font-size: 12px;
+  color: var(--muted);
+}
+.commands-list {
+  flex: 1;
+  min-height: 0;
+  overflow-y: auto;
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(min(100%, 440px), 1fr));
+  align-content: start;
+  align-items: start;
+  gap: 12px;
+  padding: 1px 5px 12px 1px;
+}
+.command-card {
+  min-width: 0;
+  padding: 16px;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  background: var(--surface);
+}
+.command-heading {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+}
+.command-heading h2 {
+  font-size: 14px;
+  font-weight: 600;
+  margin-top: 3px;
+}
+.command-heading .btn {
+  flex-shrink: 0;
+}
+.command-description,
+.command-notes,
+.command-copy-error {
+  font-size: 12px;
+  line-height: 1.7;
+  overflow-wrap: anywhere;
+}
+.command-description {
+  color: var(--secondary);
+  margin-top: 10px;
+}
+.command-meta {
+  display: flex;
+  gap: 8px 14px;
+  flex-wrap: wrap;
+  font-size: 11px;
+  color: var(--muted);
+  margin: 10px 0;
+}
+.command-meta span {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+}
+.command-code {
+  max-height: 250px;
+  padding: 12px;
+  background: var(--raised);
+  border: 1px solid var(--line);
+  border-radius: 5px;
+  overflow: auto;
+  white-space: pre;
+  user-select: text;
+  font-size: 12px;
+  line-height: 1.7;
+}
+.command-notes {
+  color: var(--muted);
+  margin-top: 10px;
+}
+.command-feedback,
+.command-copy-error {
+  display: block;
+  margin-top: 8px;
+  font-size: 12px;
+}
+.command-feedback {
+  color: var(--secondary);
+}
+.command-copy-error {
+  color: var(--danger);
+}
+.commands-empty {
+  grid-column: 1 / -1;
+  text-align: center;
+  padding: 50px 16px;
+  color: var(--muted);
 }
 .section-label,
 .table-section-heading {

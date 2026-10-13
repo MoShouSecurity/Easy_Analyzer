@@ -51,6 +51,7 @@ Rust 开发的应急响应分析工具，提供 CLI 和桌面 GUI，用于日志
 - 全集合筛选、分页查看和证据引用跳转，按需展开原始记录。
 - AI 发送前预览范围和预算，支持后台分析、进度展示和取消。
 - 在设置页管理 AI 配置，一键导出完整报告。
+- 左侧“应急响应命令”提供 Windows / Linux 各 24 条排查与取证命令，可分类、搜索和复制，无需打开项目；每条注明执行环境、权限及参数替换要求。
 
 默认在本地分析；AI 仅在主动启用后发送证据，数据不会自动脱敏。PCAP 默认发送解析摘要，原始包与载荷需额外选择。项目使用内置 SQLite，操作位于私有工作数据库，手动保存生成独立 `.eair` 快照；文件移至另一台机器后可直接续办，无需原始输入或数据库服务。项目目录只保存资料和路径，不汇总客户证据。项目不保存 AI 密钥。新版采用第二版项目格式，不读取旧格式项目。
 
@@ -81,7 +82,7 @@ CLI/GUI 负责交互；app 统一编排分析、会话、筛选、后台任务�
 
 ## 下载与构建
 
-从 [Releases](https://github.com/MoShouSecurity/easy_analyzer/releases) 下载对应平台的 CLI 或 GUI：Windows x64、Linux x64、macOS ARM64。Linux 程序和 macOS CLI 下载后需 `chmod +x`；macOS GUI 打开 DMG 后，将 `Easy Analyzer.app` 拖入“应用程序”再打开。
+从 [Releases](https://github.com/MoShouSecurity/Easy_Analyzer/releases) 下载对应平台的 CLI 或 GUI：Windows x64、Linux x64、macOS ARM64。Linux 程序和 macOS CLI 下载后需 `chmod +x`；macOS GUI 打开 DMG 后，将 `Easy Analyzer.app` 拖入“应用程序”再打开。
 
 Windows GUI 需要 WebView2，Linux GUI 需要 GTK 3 / WebKitGTK 4.1；macOS CLI 要求 11.0+，GUI 要求 13.0+，使用 ad-hoc 签名，未公证。跨平台构建不代表所有桌面交互均已实机验证。macOS 可导入离线日志；本机日志自动加载仅适用于 Windows/Linux。流量分析不支持实时抓包、TCP 重组或 TLS 解密。
 
@@ -103,7 +104,7 @@ GUI 的 DMG 包含品牌背景、拖拽箭头和固定图标布局，普通屏�
 
 Windows x64 安装包使用 `python scripts/package_gui_windows.py` 构建，需要 Node.js、Rust MSVC 工具链及 NSIS。安装到当前用户目录，提供中文/英文向导、开始菜单快捷方式及卸载入口；缺少 WebView2 时联网下载。已有 GNU 交叉构建可使用 `--target x86_64-pc-windows-gnu --bundle-only` 打包。安装包与单独校验文件保存在 `dist/`，本地构建命令不创建发布标签或上传 Release。
 
-`codex/incident-projects-ioc` 分支推送会自动运行三平台构建，并在 Actions 中提供构建附件。Rust 的格式检查、Clippy 和工作区测试在推送前于本地执行；GitHub 保留平台构建、前端检查和打包校验。明确发布的 `vX.Y.Z-preview.N` tag 会生成 [预览版 Release](https://github.com/MoShouSecurity/easy_analyzer/releases)：Windows GUI 为轻量 `setup.exe`，macOS GUI 为未压缩 DMG，Linux GUI 为独立程序，同时提供各平台 CLI 和 `SHA256SUMS`。预览版不会替换正式版的 Latest 标记；普通分支推送不发布 Release。
+`codex/incident-projects-ioc` 分支推送会自动运行三平台构建，并在 Actions 中提供构建附件。Rust 的格式检查、Clippy 和工作区测试在推送前于本地执行；GitHub 保留平台构建、前端检查和打包校验。明确发布的 `vX.Y.Z-preview.N` tag 会生成 [预览版 Release](https://github.com/MoShouSecurity/Easy_Analyzer/releases)：Windows GUI 为轻量 `setup.exe`，macOS GUI 为未压缩 DMG，Linux GUI 为独立程序，同时提供各平台 CLI 和 `SHA256SUMS`。预览版不会替换正式版的 Latest 标记；普通分支推送不发布 Release。
 
 ## 开源协议
 

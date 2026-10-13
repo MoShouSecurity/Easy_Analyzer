@@ -34,6 +34,10 @@ const mock = vi.hoisted(() => ({
   },
 }));
 vi.mock("@tauri-apps/api/core", () => ({ invoke: mock.invoke }));
+vi.mock("@tauri-apps/plugin-clipboard-manager", () => ({
+  writeText: (text: string) =>
+    mock.invoke("plugin:clipboard-manager|write_text", { text }),
+}));
 vi.mock("@tauri-apps/api/event", () => ({ listen: mock.event }));
 vi.mock("@tauri-apps/api/webviewWindow", () => ({
   getCurrentWebviewWindow: () => mock.window,
@@ -1127,4 +1131,161 @@ it("prevents closing a dirty project until the user resolves unsaved changes", a
   expect(mock.window.destroy).not.toHaveBeenCalled();
   fireEvent.click(screen.getByRole("button", { name: "放弃修改并继续" }));
   await waitFor(() => expect(mock.window.destroy).toHaveBeenCalledTimes(1));
+});
+
+describe("response command navigation", () => {
+  it("opens without a project and copies without loading evidence", async () => {
+    const original = mock.invoke.getMockImplementation()!;
+    mock.invoke.mockImplementation((command, args) =>
+      command === "initialize"
+        ? Promise.resolve({ ...boot, session_id: null, project: null })
+        : command === "project_list"
+          ? Promise.resolve([])
+          : original(command, args),
+    );
+    render(<App />);
+    await waitFor(() =>
+      expect(mock.window.onCloseRequested).toHaveBeenCalled(),
+    );
+    fireEvent.click(screen.getByRole("button", { name: "应急响应命令" }));
+    expect(screen.getByRole("heading", { name: "应急响应命令" })).toBeVisible();
+    expect(screen.getByRole("tab", { name: "Windows" })).toHaveAttribute(
+      "aria-selected",
+      "true",
+    );
+    expect(
+      screen.queryByRole("button", { name: "切换详情" }),
+    ).not.toBeInTheDocument();
+    expect(document.querySelector(".inspector")).toBeNull();
+    fireEvent.click(screen.getByRole("button", { name: "复制 查看系统信息" }));
+    await screen.findByText("已复制完整命令");
+    expect(mock.invoke).toHaveBeenCalledWith(
+      "plugin:clipboard-manager|write_text",
+      { text: "systeminfo" },
+    );
+    expect(
+      mock.invoke.mock.calls.some(([command]) =>
+        ["get_view", "project_filters", "start_import", "start_ai"].includes(
+          command,
+        ),
+      ),
+    ).toBe(false);
+  });
+
+  it("keeps command searches out of project filters and preserves the existing evidence query", async () => {
+    const original = mock.invoke.getMockImplementation()!;
+    const fresh = dirtyProjectBoot();
+    fresh.project!.dirty = false;
+    mock.invoke.mockImplementation((command, args) =>
+      command === "initialize"
+        ? Promise.resolve(structuredClone(fresh))
+        : command === "project_filters"
+          ? Promise.resolve(fresh.project)
+          : command === "project_list"
+            ? Promise.resolve([])
+            : original(command, args),
+    );
+    render(<App />);
+    await waitFor(() =>
+      expect(mock.window.onCloseRequested).toHaveBeenCalled(),
+    );
+    fireEvent.click(screen.getByRole("button", { name: "日志证据" }));
+    await screen.findByText("中文证据记录");
+    fireEvent.change(screen.getByLabelText("查询证据"), {
+      target: { value: "192.0.2.10" },
+    });
+    fireEvent.submit(screen.getByLabelText("查询证据").closest("form")!);
+    await act(async () => {
+      await new Promise((resolve) => setTimeout(resolve, 600));
+    });
+    const views = mock.invoke.mock.calls.filter(
+      ([command]) => command === "get_view",
+    ).length;
+    const saves = mock.invoke.mock.calls.filter(
+      ([command]) => command === "project_filters",
+    ).length;
+    const savedFilters = mock.invoke.mock.calls
+      .filter(([command]) => command === "project_filters")
+      .at(-1)![1].filters;
+    expect(savedFilters).not.toHaveProperty("commands");
+    fireEvent.click(screen.getByRole("button", { name: "应急响应命令" }));
+    fireEvent.change(screen.getByLabelText("搜索应急响应命令"), {
+      target: { value: "systeminfo" },
+    });
+    fireEvent.click(screen.getByRole("button", { name: "复制 查看系统信息" }));
+    await screen.findByText("已复制完整命令");
+    await act(async () => {
+      await new Promise((resolve) => setTimeout(resolve, 600));
+    });
+    expect(
+      mock.invoke.mock.calls.filter(([command]) => command === "get_view"),
+    ).toHaveLength(views);
+    expect(
+      mock.invoke.mock.calls.filter(
+        ([command]) => command === "project_filters",
+      ),
+    ).toHaveLength(saves);
+    expect(screen.getByText("客户甲响应 · 客户甲")).toBeVisible();
+    fireEvent.click(screen.getByRole("button", { name: "日志证据" }));
+    expect(screen.getByLabelText("查询证据")).toHaveValue("192.0.2.10");
+  });
+
+  it.each([false, true])(
+    "stays on the command page when import finishes (session changed: %s)",
+    async (changed) => {
+      const original = mock.invoke.getMockImplementation()!;
+      const job = {
+        task_id: 222,
+        session_id: 7,
+        epoch: 0,
+        revision: 1,
+        kind: "import",
+        status: "running",
+        label: "本地分析",
+        stage: null,
+        completed: null,
+        total: null,
+        error: null,
+        saved_paths: [],
+      };
+      let fresh: Bootstrap = { ...boot, busy: job };
+      mock.invoke.mockImplementation((command, args) =>
+        command === "initialize"
+          ? Promise.resolve(structuredClone(fresh))
+          : original(command, args),
+      );
+      render(<App />);
+      await waitFor(() =>
+        expect(mock.window.onCloseRequested).toHaveBeenCalled(),
+      );
+      fireEvent.click(screen.getByRole("button", { name: "应急响应命令" }));
+      fireEvent.mouseDown(screen.getByRole("tab", { name: "Linux" }), {
+        button: 0,
+        ctrlKey: false,
+      });
+      const views = mock.invoke.mock.calls.filter(
+        ([command]) => command === "get_view",
+      ).length;
+      const listener = mock.event.mock.calls.find(
+        ([name]) => name === "analysis-task",
+      )![1];
+      fresh = { ...fresh, busy: null, session_id: changed ? 8 : 7 };
+      await act(async () =>
+        listener({ payload: { ...job, status: "completed" } }),
+      );
+      expect(
+        screen.getByRole("heading", { name: "应急响应命令" }),
+      ).toBeVisible();
+      expect(screen.getByRole("tab", { name: "Linux" })).toHaveAttribute(
+        "aria-selected",
+        "true",
+      );
+      expect(
+        mock.invoke.mock.calls.filter(([command]) => command === "get_view"),
+      ).toHaveLength(views);
+      expect(
+        screen.getByRole("button", { name: "复制 查看系统版本" }),
+      ).toBeEnabled();
+    },
+  );
 });

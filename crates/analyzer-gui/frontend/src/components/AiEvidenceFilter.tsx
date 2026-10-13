@@ -9,12 +9,12 @@ import {
   defaultFilters,
   statusLabel,
   type Filters,
-  type Screen,
+  type SessionScreen,
   type Source,
 } from "../types";
 
 export interface EvidenceFilterContext {
-  screen: Screen;
+  screen: SessionScreen;
   filters: Filters;
 }
 
@@ -79,7 +79,7 @@ export function AiEvidenceFilter({
               ]}
               onChange={(screen) =>
                 setDraft({
-                  screen: screen as Screen,
+                  screen: screen as SessionScreen,
                   filters: {
                     ...defaultFilters(),
                     text: f.text,
