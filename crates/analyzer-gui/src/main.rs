@@ -61,6 +61,7 @@ fn main() -> anyhow::Result<()> {
     let args = arguments()?;
     tauri::Builder::default()
         .plugin(tauri_plugin_dialog::init())
+        .plugin(tauri_plugin_clipboard_manager::init())
         .setup(move |app| {
             let data = app.path().app_data_dir()?;
             app.manage(bridge::Desktop::new(data, args.clone()));

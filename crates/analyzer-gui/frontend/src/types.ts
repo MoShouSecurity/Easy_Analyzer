@@ -1,4 +1,4 @@
-export type Screen =
+export type SessionScreen =
   | "projects"
   | "ioc"
   | "import"
@@ -9,6 +9,7 @@ export type Screen =
   | "ai"
   | "reports"
   | "settings";
+export type Screen = SessionScreen | "commands";
 export type Severity = "critical" | "high" | "medium" | "low" | "info";
 export type ParseStatus = "parsed" | "unrecognized" | "malformed";
 export interface Preferences {
@@ -56,7 +57,7 @@ export interface TaskMessage {
 }
 export interface Bootstrap {
   project?: ProjectStatus | null;
-  filters?: Record<Screen, Filters> | null;
+  filters?: Record<SessionScreen, Filters> | null;
   preferences: Preferences;
   config: PublicConfig;
   config_loaded: boolean;
@@ -257,7 +258,7 @@ export interface DetailResponse {
 export interface ViewRequest {
   session_id: number;
   revision: number;
-  screen: Screen;
+  screen: SessionScreen;
   filters: Filters;
   focus_id: string | null;
   commit_selection: boolean;
@@ -287,7 +288,7 @@ export const statusLabel: Record<ParseStatus, string> = {
   unrecognized: "未识别",
   malformed: "损坏",
 };
-export const screens: Screen[] = [
+export const sessionScreens: SessionScreen[] = [
   "projects",
   "import",
   "overview",
@@ -299,8 +300,14 @@ export const screens: Screen[] = [
   "reports",
   "settings",
 ];
+export const screens: Screen[] = [
+  "projects",
+  "commands",
+  ...sessionScreens.filter((s) => s !== "projects"),
+];
 export const titles: Record<Screen, string> = {
   projects: "应急响应项目",
+  commands: "应急响应命令",
   ioc: "IOC 匹配",
   import: "导入分析",
   overview: "分析概览",
@@ -311,7 +318,9 @@ export const titles: Record<Screen, string> = {
   reports: "报告与来源",
   settings: "设置",
 };
-export const evidenceScreen = (s: Screen) =>
+export const evidenceScreen = (
+  s: Screen,
+): s is "logs" | "processes" | "network" =>
   ["logs", "processes", "network"].includes(s);
 
 export interface AiPreview {

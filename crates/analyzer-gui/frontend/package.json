@@ -1,7 +1,7 @@
 {
   "name": "easy-analyzer-ui",
   "private": true,
-  "version": "1.4.0",
+  "version": "1.5.0",
   "license": "MIT",
   "type": "module",
   "scripts": {
@@ -21,6 +21,7 @@
     "@radix-ui/react-tooltip": "^1.2.16",
     "@tanstack/react-table": "^8.21.3",
     "@tauri-apps/api": "^2.12.1",
+    "@tauri-apps/plugin-clipboard-manager": "^2.4.2",
     "class-variance-authority": "^0.7.1",
     "clsx": "^2.1.1",
     "lucide-react": "^1.49.0",

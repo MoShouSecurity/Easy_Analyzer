@@ -7,7 +7,7 @@ import type {
   IocInput,
   IocImport,
   IocView,
-  Screen,
+  SessionScreen,
   Filters,
   ViewRequest,
   ViewResponse,
@@ -39,8 +39,10 @@ export const api = {
     invoke<ProjectStatus>("project_edit", { sessionId, info }),
   note: (sessionId: number, record: string, text: string) =>
     invoke<ProjectStatus>("project_note", { sessionId, record, text }),
-  projectFilters: (sessionId: number, filters: Record<Screen, Filters>) =>
-    invoke<ProjectStatus>("project_filters", { sessionId, filters }),
+  projectFilters: (
+    sessionId: number,
+    filters: Record<SessionScreen, Filters>,
+  ) => invoke<ProjectStatus>("project_filters", { sessionId, filters }),
   importIoc: (sessionId: number, input: IocInput) =>
     invoke<IocImport>("import_ioc", { sessionId, input }),
   ioc: (sessionId: number, offset: number, hitOffset: number) =>
