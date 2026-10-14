@@ -658,7 +658,8 @@ small {
   text-overflow: ellipsis;
 }
 .select-content {
-  z-index: 80;
+  /* Portaled menus must sit above dialogs (91) and below tooltips (100). */
+  z-index: 95;
   background: var(--surface);
   border: 1px solid var(--line-strong);
   border-radius: 7px;
