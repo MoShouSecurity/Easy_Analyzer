@@ -1,5 +1,7 @@
 import * as SelectPrimitive from "@radix-ui/react-select";
 import { Check, ChevronDown, ChevronUp } from "lucide-react";
+// Radix requires non-empty values; prefix every option to avoid reserved values.
+const optionPrefix = "option:";
 export function Select({
   value,
   onChange,
@@ -17,8 +19,8 @@ export function Select({
 }) {
   return (
     <SelectPrimitive.Root
-      value={value || "all"}
-      onValueChange={(v) => onChange(v === "all" ? "" : v)}
+      value={optionPrefix + value}
+      onValueChange={(v) => onChange(v.slice(optionPrefix.length))}
       disabled={disabled}
     >
       <SelectPrimitive.Trigger
@@ -42,8 +44,8 @@ export function Select({
           <SelectPrimitive.Viewport>
             {options.map((o) => (
               <SelectPrimitive.Item
-                key={o.value || "all"}
-                value={o.value || "all"}
+                key={o.value}
+                value={optionPrefix + o.value}
                 className="select-item"
               >
                 <SelectPrimitive.ItemText>{o.label}</SelectPrimitive.ItemText>
