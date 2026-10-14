@@ -2412,7 +2412,8 @@ small {
   min-width: 0;
 }
 .project-start,
-.project-browser {
+.project-browser,
+.project-current {
   display: flex;
   flex-direction: column;
   gap: 16px;
@@ -2420,6 +2421,45 @@ small {
   border: 1px solid var(--line);
   border-radius: var(--radius);
   background: var(--surface);
+}
+.project-current-heading {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  gap: 12px;
+}
+.project-current-heading h3 {
+  font-size: 15px;
+}
+.project-current-heading p {
+  margin: 6px 0 0;
+  color: var(--muted);
+  font-size: 12px;
+}
+.project-current-heading .btn {
+  flex-shrink: 0;
+}
+.project-current-fields {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 14px 24px;
+  margin: 0;
+}
+.project-current-fields > div:last-child {
+  grid-column: 1 / -1;
+}
+.project-current-fields dt {
+  margin-bottom: 5px;
+  font-size: 12px;
+  color: var(--muted);
+}
+.project-current-fields dd {
+  margin: 0;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+}
+.project-editor-dialog {
+  width: min(640px, calc(100vw - 48px));
 }
 .project-start h3,
 .project-list-heading h3 {

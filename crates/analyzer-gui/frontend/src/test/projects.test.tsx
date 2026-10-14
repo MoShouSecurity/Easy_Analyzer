@@ -5,6 +5,7 @@ import {
   waitFor,
   cleanup,
   within,
+  act,
 } from "@testing-library/react";
 import { afterEach, beforeEach, it, vi, expect } from "vitest";
 import {
@@ -139,6 +140,84 @@ it("searches project metadata and clearly identifies missing files", async () =>
       }),
     ),
   );
+});
+
+it.each([
+  ["响应开始时间（含时区） *", "2026-10-14T09:00:00", "响应开始时间"],
+  ["响应结束时间（含时区）", "invalid", "响应结束时间"],
+])(
+  "rejects invalid editing time in %s before applying",
+  async (label, value, error) => {
+    const save = vi.fn();
+    render(
+      <ProjectEditor
+        mode="edit"
+        info={{ ...newProject(), name: "合成响应", client: "合成客户" }}
+        busy={false}
+        onClose={() => {}}
+        onSave={save}
+      />,
+    );
+    fireEvent.change(screen.getByLabelText(label), { target: { value } });
+    fireEvent.click(screen.getByRole("button", { name: "应用修改" }));
+    expect(await screen.findByRole("alert")).toHaveTextContent(error);
+    expect(save).not.toHaveBeenCalled();
+  },
+);
+
+it("blocks duplicate editing requests and preserves the draft on failure", async () => {
+  let reject!: (reason: string) => void;
+  const save = vi.fn(
+    () =>
+      new Promise<void>((_, fail) => {
+        reject = fail;
+      }),
+  );
+  const close = vi.fn();
+  render(
+    <ProjectEditor
+      mode="edit"
+      info={{ ...newProject(), name: "合成响应", client: "合成客户" }}
+      busy={false}
+      onClose={close}
+      onSave={save}
+    />,
+  );
+  const name = screen.getByLabelText("项目名称");
+  fireEvent.change(name, { target: { value: "更新后的响应" } });
+  fireEvent.submit(name.closest("form")!);
+  fireEvent.submit(name.closest("form")!);
+  expect(save).toHaveBeenCalledTimes(1);
+  expect(name).toBeDisabled();
+  expect(screen.getByRole("button", { name: "取消" })).toBeDisabled();
+  fireEvent.click(screen.getByRole("button", { name: "关闭" }));
+  expect(close).not.toHaveBeenCalled();
+  await act(async () => reject("合成应用失败"));
+  expect(await screen.findByRole("alert")).toHaveTextContent("合成应用失败");
+  expect(name).toHaveValue("更新后的响应");
+  expect(screen.getByRole("button", { name: "应用修改" })).toBeEnabled();
+});
+
+it("cancels project edits without modifying the original metadata", () => {
+  const info = { ...newProject(), name: "原项目", client: "原客户" };
+  const close = vi.fn();
+  const save = vi.fn();
+  render(
+    <ProjectEditor
+      mode="edit"
+      info={info}
+      busy={false}
+      onClose={close}
+      onSave={save}
+    />,
+  );
+  fireEvent.change(screen.getByLabelText("项目名称"), {
+    target: { value: "取消的修改" },
+  });
+  fireEvent.click(screen.getByRole("button", { name: "取消" }));
+  expect(close).toHaveBeenCalledTimes(1);
+  expect(save).not.toHaveBeenCalled();
+  expect(info.name).toBe("原项目");
 });
 function projectEntry(name: string): ProjectEntry {
   return {

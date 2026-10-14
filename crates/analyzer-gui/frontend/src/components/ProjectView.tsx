@@ -1,6 +1,7 @@
-import { useState, useEffect } from "react";
+import { useState, useEffect, useRef } from "react";
+import { LoaderCircle, Pencil } from "lucide-react";
 import { api } from "../lib/api";
-import type { ProjectEntry, ProjectInfo } from "../types";
+import type { ProjectEntry, ProjectInfo, ProjectStatus } from "../types";
 import { Button } from "./ui/button";
 import { Dialog } from "./ui/dialog";
 export function localTimestamp() {
@@ -27,11 +28,13 @@ export function newProject(): ProjectInfo {
 }
 export function ProjectEditor({
   info,
+  mode = "create",
   busy,
   onClose,
   onSave,
 }: {
   info: ProjectInfo;
+  mode?: "create" | "edit";
   busy: boolean;
   onClose: () => void;
   onSave: (v: ProjectInfo) => Promise<void>;
@@ -39,6 +42,13 @@ export function ProjectEditor({
   const [value, setValue] = useState(info);
   const [nameEdited, setNameEdited] = useState(Boolean(info.name.trim()));
   const [error, setError] = useState("");
+  const [submitting, setSubmitting] = useState(false);
+  const pending = useRef(false);
+  const locked = busy || submitting;
+  const validTime = (text: string) =>
+    /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d+)?(?:Z|[+-]\d{2}:\d{2})$/i.test(
+      text,
+    ) && !Number.isNaN(Date.parse(text));
   const fields: [keyof ProjectInfo, string, boolean][] = [
     ["client", "客户单位", true],
     ["name", "项目名称", false],
@@ -48,36 +58,57 @@ export function ProjectEditor({
     ["responders", "服务人员", false],
   ];
   const submit = async () => {
+    if (busy || pending.current) return;
     const name = value.name.trim() || value.client.trim();
-    if (
-      !value.client.trim() ||
-      Number.isNaN(Date.parse(value.response_start))
-    ) {
-      setError("请填写客户单位和包含时区的开始时间");
+    const start = value.response_start.trim();
+    const end = value.response_end?.trim() || null;
+    if (!value.client.trim()) {
+      setError("请填写客户单位");
       return;
     }
-    if (
-      value.response_end &&
-      Date.parse(value.response_end) < Date.parse(value.response_start)
-    ) {
+    if (!validTime(start)) {
+      setError("响应开始时间必须包含日期、时间和时区");
+      return;
+    }
+    if (end && !validTime(end)) {
+      setError("响应结束时间必须包含日期、时间和时区");
+      return;
+    }
+    if (end && Date.parse(end) < Date.parse(start)) {
       setError("响应结束时间不能早于开始时间");
       return;
     }
     setError("");
+    pending.current = true;
+    setSubmitting(true);
     try {
-      await onSave({ ...value, name });
+      await onSave({
+        ...value,
+        name,
+        client: value.client.trim(),
+        response_start: start,
+        response_end: end,
+      });
     } catch (e) {
       setError(String(e));
+    } finally {
+      pending.current = false;
+      setSubmitting(false);
     }
   };
   return (
     <Dialog
       open
       onOpenChange={(v) => {
-        if (!v && !busy) onClose();
+        if (!v && !locked) onClose();
       }}
-      title={info.name ? "编辑项目资料" : "新建应急响应项目"}
-      description="同一次响应可以持续多天，并追加多次证据。"
+      title={mode === "edit" ? "编辑项目资料" : "新建应急响应项目"}
+      className="project-editor-dialog"
+      description={
+        mode === "edit"
+          ? "修改项目资料，应用后点击顶部“保存”写入项目文件。"
+          : "同一次响应可以持续多天，并追加多次证据。"
+      }
     >
       <form
         onSubmit={(e) => {
@@ -91,6 +122,7 @@ export function ProjectEditor({
             {label}
             {required ? " *" : ""}
             <input
+              disabled={locked}
               required={required}
               value={value[key] ?? ""}
               placeholder={
@@ -115,6 +147,7 @@ export function ProjectEditor({
         <label className="full">
           项目说明
           <textarea
+            disabled={locked}
             value={value.description}
             onChange={(e) =>
               setValue((v) => ({ ...v, description: e.target.value }))
@@ -131,12 +164,17 @@ export function ProjectEditor({
             variant="ghost"
             type="button"
             onClick={onClose}
-            disabled={busy}
+            disabled={locked}
           >
             取消
           </Button>
-          <Button type="submit" disabled={busy}>
-            确认项目资料
+          <Button type="submit" disabled={locked}>
+            {submitting && <LoaderCircle size={14} className="spin" />}
+            {submitting
+              ? "正在应用…"
+              : mode === "edit"
+                ? "应用修改"
+                : "确认项目资料"}
           </Button>
         </div>
       </form>
@@ -145,12 +183,16 @@ export function ProjectEditor({
 }
 export function ProjectHome({
   busy,
+  current = null,
+  onEdit,
   onNew,
   onOpen,
   onPick,
   onError,
 }: {
   busy: boolean;
+  current?: ProjectStatus | null;
+  onEdit?: () => void;
   onNew: () => void;
   onOpen: (path: string) => void;
   onPick: () => void;
@@ -186,7 +228,16 @@ export function ProjectHome({
       stale = true;
       clearTimeout(timeout);
     };
-  }, [text, client, from, until, refresh]);
+  }, [
+    text,
+    client,
+    from,
+    until,
+    refresh,
+    current?.info.id,
+    current?.path,
+    current?.dirty,
+  ]);
   const remove = async () => {
     if (!removal || busy || removing) return;
     setRemoving(true);
@@ -205,6 +256,45 @@ export function ProjectHome({
   };
   return (
     <div className="project-page">
+      {current && (
+        <section
+          className="project-current"
+          aria-labelledby="project-current-title"
+        >
+          <div className="project-current-heading">
+            <div>
+              <h3 id="project-current-title">当前项目资料</h3>
+              <p>{current.dirty ? "有未保存的修改" : "已保存"}</p>
+            </div>
+            <Button
+              variant="secondary"
+              disabled={busy || removing || !onEdit}
+              onClick={onEdit}
+            >
+              <Pencil size={14} />
+              编辑项目资料
+            </Button>
+          </div>
+          <dl className="project-current-fields">
+            {(
+              [
+                ["项目名称", current.info.name],
+                ["客户单位", current.info.client],
+                ["响应开始时间", current.info.response_start],
+                ["响应结束时间", current.info.response_end],
+                ["响应地点", current.info.location],
+                ["服务人员", current.info.responders],
+                ["项目说明", current.info.description],
+              ] as const
+            ).map(([label, text]) => (
+              <div key={label}>
+                <dt>{label}</dt>
+                <dd>{text || "未填写"}</dd>
+              </div>
+            ))}
+          </dl>
+        </section>
+      )}
       <section className="project-start" aria-labelledby="project-start-title">
         <div>
           <h3 id="project-start-title">新建或续办应急响应</h3>

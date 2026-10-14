@@ -5,6 +5,7 @@ import {
   waitFor,
   cleanup,
   act,
+  within,
 } from "@testing-library/react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import userEvent from "@testing-library/user-event";
@@ -1131,6 +1132,128 @@ it("prevents closing a dirty project until the user resolves unsaved changes", a
   expect(mock.window.destroy).not.toHaveBeenCalled();
   fireEvent.click(screen.getByRole("button", { name: "放弃修改并继续" }));
   await waitFor(() => expect(mock.window.destroy).toHaveBeenCalledTimes(1));
+});
+
+it("edits all project details through explicit entries and restores them after saving", async () => {
+  const original = mock.invoke.getMockImplementation()!;
+  let fresh = dirtyProjectBoot();
+  fresh.project!.dirty = false;
+  const identity = {
+    id: fresh.project!.info.id,
+    created_at: fresh.project!.info.created_at,
+  };
+  let catalogInfo = structuredClone(fresh.project!.info);
+  const job = {
+    task_id: 300,
+    session_id: 7,
+    epoch: 0,
+    revision: 3,
+    kind: "project_save",
+    status: "running",
+    label: "保存项目",
+    stage: null,
+    completed: null,
+    total: null,
+    error: null,
+    saved_paths: [],
+  };
+  mock.invoke.mockImplementation(async (cmd, args) => {
+    if (cmd === "initialize") return structuredClone(fresh);
+    if (cmd === "project_list")
+      return [
+        {
+          info: catalogInfo,
+          path: "/tmp/synthetic.eair",
+          last_opened: "2026-10-14T15:00:00+08:00",
+          missing: false,
+        },
+      ];
+    if (cmd === "project_filters") return structuredClone(fresh.project);
+    if (cmd === "project_edit") {
+      fresh = {
+        ...fresh,
+        project: {
+          ...fresh.project!,
+          info: args.info,
+          dirty: true,
+          revision: 3,
+        },
+      };
+      return structuredClone(fresh.project);
+    }
+    if (cmd === "project_save") return job;
+    return original(cmd, args);
+  });
+  const { unmount } = render(<App />);
+  await screen.findByRole("heading", { name: "当前项目资料" });
+  fireEvent.click(screen.getByRole("button", { name: "编辑资料" }));
+  await screen.findByRole("dialog", { name: "编辑项目资料" });
+  const values = [
+    ["项目名称", "更新后的响应"],
+    ["客户单位 *", "更新后的客户"],
+    ["响应开始时间（含时区） *", "2026-10-13T09:00:00+08:00"],
+    ["响应结束时间（含时区）", "2026-10-14T18:00:00+08:00"],
+    ["响应地点", "合成地点"],
+    ["服务人员", "合成服务人员"],
+    ["项目说明", "更新后的项目说明"],
+  ];
+  for (const [label, value] of values)
+    fireEvent.change(screen.getByLabelText(label), { target: { value } });
+  fireEvent.click(screen.getByRole("button", { name: "应用修改" }));
+  await waitFor(() =>
+    expect(screen.queryByRole("dialog")).not.toBeInTheDocument(),
+  );
+  expect(mock.invoke).toHaveBeenCalledWith("project_edit", {
+    sessionId: 7,
+    info: expect.objectContaining({
+      ...identity,
+      name: "更新后的响应",
+      client: "更新后的客户",
+      response_start: "2026-10-13T09:00:00+08:00",
+      response_end: "2026-10-14T18:00:00+08:00",
+      location: "合成地点",
+      responders: "合成服务人员",
+      description: "更新后的项目说明",
+    }),
+  });
+  const card = screen.getByRole("region", { name: "当前项目资料" });
+  expect(within(card).getByText("有未保存的修改")).toBeVisible();
+  for (const [, value] of values)
+    expect(within(card).getByText(value)).toBeVisible();
+  fireEvent.click(screen.getByRole("button", { name: "保存 *" }));
+  await waitFor(() =>
+    expect(mock.invoke).toHaveBeenCalledWith("project_save", {
+      sessionId: 7,
+      path: "/tmp/synthetic.eair",
+      overwrite: false,
+    }),
+  );
+  fresh.project!.dirty = false;
+  catalogInfo = structuredClone(fresh.project!.info);
+  const listener = mock.event.mock.calls.find(
+    ([name]) => name === "analysis-task",
+  )![1];
+  await act(async () =>
+    listener({
+      payload: {
+        ...job,
+        status: "completed",
+        saved_paths: ["/tmp/synthetic.eair"],
+      },
+    }),
+  );
+  await waitFor(() => expect(within(card).getByText("已保存")).toBeVisible());
+  await screen.findByRole("heading", { name: "更新后的响应" });
+  unmount();
+  render(<App />);
+  await screen.findByRole("heading", { name: "当前项目资料" });
+  fireEvent.click(screen.getByRole("button", { name: "编辑项目资料" }));
+  await screen.findByRole("dialog", { name: "编辑项目资料" });
+  for (const [label, value] of values)
+    expect(screen.getByLabelText(label)).toHaveValue(value);
+  expect(mock.invoke.mock.calls.some(([cmd]) => cmd === "project_create")).toBe(
+    false,
+  );
 });
 
 describe("response command navigation", () => {

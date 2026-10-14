@@ -39,6 +39,7 @@ import {
   SlidersHorizontal,
   History,
   Terminal,
+  Pencil,
 } from "lucide-react";
 import type { ColumnDef } from "@tanstack/react-table";
 import { api } from "./lib/api";
@@ -167,6 +168,7 @@ interface Bookmark {
 export function App() {
   const [editor, setEditor] = useState<ProjectInfo | null>(null);
   const [editing, setEditing] = useState(false);
+  const [projectSubmitting, setProjectSubmitting] = useState(false);
   const [dirtyOpen, setDirtyOpen] = useState(false);
   const pendingAction = useRef<(() => void) | null>(null);
   const afterSave = useRef<(() => void) | null>(null);
@@ -256,7 +258,8 @@ export function App() {
     overview = data?.overview || lastView?.overview,
     active = screen === "commands" ? defaultFilters() : filters[screen],
     hasSession = boot?.session_id !== null && !!boot,
-    busy = !!task || elevationBusy || aiSending || aiFilterBusy,
+    busy =
+      !!task || elevationBusy || aiSending || aiFilterBusy || projectSubmitting,
     narrow = width < 1200,
     compact = width < 1024;
   const refresh = useCallback(
@@ -886,6 +889,12 @@ export function App() {
       setEditing(false);
       setEditor(newProject());
     });
+  const editProject = () => {
+    const project = projectRef.current;
+    if (busy || !project) return;
+    setEditing(true);
+    setEditor(structuredClone(project.info));
+  };
   const openProject = (path: string) =>
     guarded(() => void launch(() => api.openProject(path)));
   const pickProject = async () => {
@@ -920,16 +929,27 @@ export function App() {
     }
   };
   const submitProject = async (info: ProjectInfo) => {
-    if (editing && session.current !== null) {
-      const sid = session.current;
-      const project = await api.editProject(sid, info);
-      if (session.current === sid) setBoot((v) => (v ? { ...v, project } : v));
-    } else {
-      lifecycle.current++;
-      const job = await api.createProject(info);
-      if (!ended.current.has(job.task_id)) setTask(job);
+    if (busy) throw new Error("请等待当前操作完成");
+    setProjectSubmitting(true);
+    try {
+      if (editing) {
+        const sid = session.current;
+        if (sid === null || projectRef.current?.info.id !== info.id)
+          throw new Error("当前项目已切换，请重新打开编辑窗口");
+        const project = await api.editProject(sid, info);
+        if (session.current !== sid)
+          throw new Error("当前项目已切换，请重新打开编辑窗口");
+        setBoot((v) => (v ? { ...v, project } : v));
+        setNotice("项目资料已修改，请保存项目");
+      } else {
+        lifecycle.current++;
+        const job = await api.createProject(info);
+        if (!ended.current.has(job.task_id)) setTask(job);
+      }
+      setEditor(null);
+    } finally {
+      setProjectSubmitting(false);
     }
-    setEditor(null);
   };
   useEffect(() => {
     const sid = boot?.session_id;
@@ -1415,13 +1435,9 @@ export function App() {
             </span>
             <button
               className="toolbar-project"
+              title={boot?.project ? "编辑项目资料" : undefined}
               disabled={busy || !boot?.project}
-              onClick={() => {
-                if (boot?.project) {
-                  setEditing(true);
-                  setEditor(boot.project.info);
-                }
-              }}
+              onClick={editProject}
             >
               {boot?.project
                 ? `${boot.project.info.name} · ${boot.project.info.client}${boot.project.dirty ? " *" : ""}`
@@ -1441,6 +1457,10 @@ export function App() {
           <div className="toolbar-actions">
             {boot?.project && (
               <>
+                <Button variant="ghost" disabled={busy} onClick={editProject}>
+                  <Pencil size={14} />
+                  编辑资料
+                </Button>
                 <Button
                   variant="ghost"
                   disabled={busy}
@@ -1665,6 +1685,8 @@ export function App() {
               {screen === "projects" && (
                 <ProjectHome
                   busy={busy}
+                  current={boot?.project}
+                  onEdit={editProject}
                   onNew={createProject}
                   onOpen={openProject}
                   onPick={() => void pickProject()}
@@ -2524,6 +2546,7 @@ export function App() {
           <ProjectEditor
             key={editor.id + String(editing)}
             info={editor}
+            mode={editing ? "edit" : "create"}
             busy={busy}
             onClose={() => setEditor(null)}
             onSave={submitProject}
