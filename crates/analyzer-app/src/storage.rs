@@ -122,6 +122,7 @@ impl Database {
     }
     pub fn configure(c: &Connection) -> Result<()> {
         crate::compression::register(c)?;
+        crate::log_query::register(c)?;
         c.execute_batch("PRAGMA foreign_keys=ON;PRAGMA trusted_schema=OFF;PRAGMA temp_store=FILE;PRAGMA cache_size=-8192;PRAGMA journal_mode=DELETE;")?;
         c.busy_timeout(std::time::Duration::from_secs(2))?;
         Ok(())
@@ -475,7 +476,7 @@ impl Database {
         } else {
             "COALESCE(NULLIF(r.preview,''),r.data)"
         };
-        let mut stmt = c.prepare(&format!("SELECT r.id,r.source_id,r.timestamp,r.status,{data},r.summary FROM records r WHERE {} ORDER BY r.ordinal LIMIT ? OFFSET ?", membership.predicate))?;
+        let mut stmt = c.prepare(&format!("SELECT r.id,r.source_id,r.timestamp,r.status,{data},r.summary FROM records r WHERE {} ORDER BY {} LIMIT ? OFFSET ?", membership.predicate, selection.order.sql()))?;
         let mut rows = stmt.query(rusqlite::params_from_iter(&membership.arguments))?;
         let mut items = Vec::new();
         while let Some(r) = rows.next()? {
@@ -512,8 +513,13 @@ impl Database {
                 args.push(ordinal.into());
                 Ok(c.query_row(
                     &format!(
-                        "SELECT COUNT(*) FROM records r WHERE {} AND r.ordinal<?",
-                        membership.predicate
+                        "SELECT COUNT(*) FROM records r WHERE {} AND r.ordinal{}?",
+                        membership.predicate,
+                        if selection.order == RecordOrder::OriginalDesc {
+                            ">"
+                        } else {
+                            "<"
+                        }
                     ),
                     rusqlite::params_from_iter(args),
                     |r| r.get::<_, i64>(0),
@@ -530,6 +536,7 @@ pub(crate) struct StoredSelection {
     pub count: usize,
     pub ids: std::sync::OnceLock<Vec<String>>,
     pub lazy: Option<SqlSelection>,
+    pub order: RecordOrder,
     pub materialized: std::sync::OnceLock<()>,
 }
 #[derive(Debug)]
@@ -557,8 +564,10 @@ impl StoredSelection {
             if self.materialized.get().is_none() {
                 let tx = c.transaction()?;
                 let sql = format!(
-                    "INSERT INTO selection_refs SELECT {},ROW_NUMBER() OVER(ORDER BY r.ordinal)-1,r.id FROM records r WHERE {}",
-                    self.id, lazy.predicate
+                    "INSERT INTO selection_refs SELECT {},ROW_NUMBER() OVER(ORDER BY {})-1,r.id FROM records r WHERE {}",
+                    self.id,
+                    self.order.sql(),
+                    lazy.predicate
                 );
                 with_progress(&tx, ctx, || {
                     Ok(tx.execute(&sql, rusqlite::params_from_iter(&lazy.arguments))?)
@@ -595,6 +604,10 @@ impl Database {
         use rusqlite::types::Value;
         let search =
             core::rules::compile_query(filter.query.expression.as_deref(), filter.query.regex)?;
+        let (from, until) = filter.log_query.bounds()?;
+        let log_filtered = from.is_some() || until.is_some() || filter.log_query.has_fields();
+        let time_sql = crate::log_query::time_sql(filter.log_query.time_offset);
+        let order_sql = filter.order.query_sql(filter.log_query.time_offset);
         let mut clauses = vec!["1=1".to_string()];
         let mut args: Vec<Value> = vec![];
         for (column, value) in [
@@ -620,11 +633,24 @@ impl Database {
         if filter.query.suspicious {
             clauses.push("EXISTS(SELECT 1 FROM finding_refs e JOIN findings f ON f.id=e.finding_id WHERE e.record_id=r.id AND f.origin LIKE 'local:%')".into());
         }
+        for (comparison, value) in [(">=", from), ("<=", until)] {
+            if let Some(value) = value {
+                args.push(value.into());
+                clauses.push(format!("{time_sql}{comparison}?"));
+            }
+        }
+        if filter.log_query.has_fields() {
+            args.push(json(&filter.log_query)?.into());
+            clauses.push("eair_log_match(r.data,?)".into());
+        }
         let mut c = self.lock()?;
         let tx = c.transaction()?;
         // Records are append-only. The upper ordinal freezes a typed selection
         // without copying every ID; text and finding-dependent selections stay materialized.
-        let lazy = search.is_none() && !filter.query.suspicious;
+        let lazy = search.is_none()
+            && !filter.query.suspicious
+            && filter.order.original()
+            && !log_filtered;
         if lazy {
             args.push(
                 tx.query_row("SELECT COALESCE(MAX(ordinal),0) FROM records", [], |r| {
@@ -637,45 +663,47 @@ impl Database {
         let where_sql = clauses.join(" AND ");
         tx.execute("INSERT INTO selections(count) VALUES(0)", [])?;
         let id = tx.last_insert_rowid();
-        let mut count = 0;
-        if let Some(search) = search {
-            let mut s = tx.prepare(&format!(
-                "SELECT id,raw,data FROM records r WHERE {where_sql} ORDER BY ordinal"
-            ))?;
-            let mut rows = s.query(rusqlite::params_from_iter(args.iter()))?;
-            let mut n = 0;
-            while let Some(r) = rows.next()? {
-                ctx.tick(core::execution::Stage::Query, None, n, None)?;
-                n += 1;
-                let raw = row_text(r, 1)?;
-                let data = row_text(r, 2)?;
-                if search.is_match(&raw) || search.is_match(&data) {
-                    tx.execute(
-                        "INSERT INTO selection_refs VALUES(?1,?2,?3)",
-                        params![id, count as i64, r.get::<_, String>(0)?],
-                    )?;
-                    count += 1;
+        let count = if let Some(search) = search {
+            with_progress(&tx, ctx, || {
+                let mut count = 0;
+                let mut s = tx.prepare(&format!(
+                    "SELECT id,raw,data FROM records r WHERE {where_sql} ORDER BY {}",
+                    order_sql
+                ))?;
+                let mut rows = s.query(rusqlite::params_from_iter(args.iter()))?;
+                let mut n = 0;
+                while let Some(r) = rows.next()? {
+                    ctx.tick(core::execution::Stage::Query, None, n, None)?;
+                    n += 1;
+                    let raw = row_text(r, 1)?;
+                    let data = row_text(r, 2)?;
+                    if search.is_match(&raw) || search.is_match(&data) {
+                        tx.execute(
+                            "INSERT INTO selection_refs VALUES(?1,?2,?3)",
+                            params![id, count as i64, r.get::<_, String>(0)?],
+                        )?;
+                        count += 1;
+                    }
                 }
-            }
+                Ok(count)
+            })?
         } else if lazy {
-            count = with_progress(&tx, ctx, || {
+            with_progress(&tx, ctx, || {
                 Ok(tx.query_row(
                     &format!("SELECT COUNT(*) FROM records r WHERE {where_sql}"),
                     rusqlite::params_from_iter(&args),
                     |r| r.get::<_, i64>(0),
                 )? as usize)
-            })?;
+            })?
         } else {
-            let token = ctx.cancellation.clone();
-            tx.progress_handler(2048, Some(move || token.is_cancelled()))?;
             let sql = format!(
-                "INSERT INTO selection_refs SELECT {id},ROW_NUMBER() OVER(ORDER BY r.ordinal)-1,r.id FROM records r WHERE {where_sql}"
+                "INSERT INTO selection_refs SELECT {id},ROW_NUMBER() OVER(ORDER BY {})-1,r.id FROM records r WHERE {where_sql}",
+                order_sql
             );
-            let result = tx.execute(&sql, rusqlite::params_from_iter(args.iter()));
-            tx.progress_handler(0, None::<fn() -> bool>)?;
-            ctx.check()?;
-            count = result?;
-        }
+            with_progress(&tx, ctx, || {
+                Ok(tx.execute(&sql, rusqlite::params_from_iter(args.iter()))?)
+            })?
+        };
         tx.execute(
             "UPDATE selections SET count=?1 WHERE id=?2",
             params![count as i64, id],
@@ -694,6 +722,7 @@ impl Database {
                     predicate: where_sql,
                     arguments: args,
                 }),
+                order: filter.order,
                 materialized: Default::default(),
             })),
         })
@@ -1003,6 +1032,7 @@ impl Database {
                 count,
                 ids: Default::default(),
                 lazy: None,
+                order: crate::RecordOrder::default(),
                 materialized: Default::default(),
             })),
         })

@@ -173,6 +173,7 @@ impl AnalysisSession {
                     count: n,
                     ids: Default::default(),
                     lazy: None,
+                    order: crate::RecordOrder::default(),
                     materialized: Default::default(),
                 })),
             });

@@ -3,6 +3,7 @@ pub mod collect;
 pub mod execution;
 pub mod ingest;
 pub mod ioc;
+mod middleware;
 pub mod model;
 pub mod network;
 pub mod process;

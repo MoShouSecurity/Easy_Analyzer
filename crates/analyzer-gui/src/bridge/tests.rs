@@ -474,3 +474,52 @@ fn database_project_pages_notes_and_stale_views_are_isolated() {
         .is_err()
     );
 }
+
+#[test]
+fn log_time_and_field_filters_are_global_and_preserved_across_pages() {
+    let session = ProjectService::create(ProjectInfo::new("日志查询验证", "合成客户")).unwrap();
+    let text = (0..125).map(|i| format!("2026-10-14T00:{:02}:{:02}Z host sshd: Accepted password for synthetic from 192.0.2.10 port 22 ssh2", i / 60, i % 60)).collect::<Vec<_>>().join("\n");
+    ProjectService::append(
+        &session,
+        &AnalysisRequest {
+            inputs: vec![AnalysisInput::Bytes {
+                label: "query.log".into(),
+                bytes: text.into_bytes().into(),
+            }],
+            ..Default::default()
+        },
+        &ExecutionContext::default(),
+    )
+    .unwrap();
+    let mut req = request(&session, Screen::Logs);
+    req.filters.limit = 50;
+    req.filters.order = RecordOrder::TimeDesc;
+    req.filters.log_query.time_from = Some("2026-10-14T08:00:00+08:00".into());
+    req.filters.log_query.time_until = Some("2026-10-14T00:02:04Z".into());
+    req.filters.log_query.fields = vec![LogFieldQuery {
+        field: "user".into(),
+        value: "synthetic".into(),
+        mode: FieldMatch::Equals,
+    }];
+    let (first, selected) = build_view(&session, &req, &ExecutionContext::default()).unwrap();
+    assert_eq!(selected.as_ref().unwrap().len(), 125);
+    assert_eq!(first.records.as_ref().unwrap().total, 125);
+    assert_eq!(
+        first.records.as_ref().unwrap().items[0]
+            .timestamp
+            .as_deref(),
+        Some("2026-10-14T00:02:04+00:00")
+    );
+    req.filters.offset = 50;
+    let (second, _) = build_view(&session, &req, &ExecutionContext::default()).unwrap();
+    assert_eq!(
+        second.records.as_ref().unwrap().items[0]
+            .timestamp
+            .as_deref(),
+        Some("2026-10-14T00:01:14+00:00")
+    );
+    assert_eq!(second.records.as_ref().unwrap().total, 125);
+    let legacy: Filters = serde_json::from_value(serde_json::json!({"text":"legacy"})).unwrap();
+    assert_eq!(legacy.order, RecordOrder::OriginalAsc);
+    assert_eq!(legacy.log_query, LogQuery::default());
+}

@@ -665,7 +665,7 @@ small {
   border-radius: 7px;
   padding: 4px;
   min-width: var(--radix-select-trigger-width);
-  max-height: 320px;
+  max-height: min(320px, var(--radix-select-content-available-height));
   box-shadow: var(--shadow);
   font-size: 13px;
   max-width: 340px;
@@ -2461,6 +2461,62 @@ small {
 .project-editor-dialog {
   width: min(640px, calc(100vw - 48px));
 }
+.log-query-dialog {
+  width: min(760px, calc(100vw - 48px));
+  display: flex;
+  flex-direction: column;
+  overflow: hidden;
+}
+.log-query-dialog > form {
+  display: flex;
+  flex-direction: column;
+  min-height: 0;
+}
+.log-query-body {
+  min-height: 0;
+  overflow-y: auto;
+  padding-right: 6px;
+}
+.log-query-dialog .dialog-heading,
+.log-query-dialog .dialog-actions,
+.log-query-dialog .warning-note {
+  flex-shrink: 0;
+}
+.log-query-grid {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 0 18px;
+}
+.log-query-grid .input,
+.log-query-grid .select-trigger {
+  width: 100%;
+  max-width: none;
+}
+.log-query-hint {
+  margin: 10px 0;
+  color: var(--muted);
+  font-size: 12px;
+  line-height: 1.8;
+}
+.log-query-custom-heading {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  margin-top: 16px;
+}
+.log-query-custom-row {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) 88px minmax(0, 1fr) 32px;
+  align-items: center;
+  gap: 8px;
+  margin-top: 8px;
+}
+.ai-log-query {
+  margin-top: 16px;
+}
+.ai-log-query summary {
+  cursor: pointer;
+}
 .project-start h3,
 .project-list-heading h3 {
   font-size: 15px;
@@ -2604,4 +2660,14 @@ small {
   display: flex;
   flex-direction: column;
   gap: 14px;
+}
+
+.log-query-windows {
+  margin: 12px 0;
+}
+.log-query-windows summary {
+  cursor: pointer;
+  color: var(--muted);
+  font-size: 12px;
+  margin-bottom: 10px;
 }

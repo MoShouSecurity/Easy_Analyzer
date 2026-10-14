@@ -192,6 +192,7 @@ fn clone_snapshot(
 }
 fn validate_file(c: &Connection, ctx: &ExecutionContext) -> Result<ProjectInfo> {
     crate::compression::register(c)?;
+    crate::log_query::register(c)?;
     c.execute_batch("PRAGMA trusted_schema=OFF;")?;
     if c.pragma_query_value(None, "application_id", |r| r.get::<_, i32>(0))? != APP_ID {
         bail!("这不是 Easy Analyzer 项目文件");

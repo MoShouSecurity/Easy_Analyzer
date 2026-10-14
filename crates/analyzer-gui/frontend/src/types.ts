@@ -82,6 +82,8 @@ export interface Filters {
   category: string | null;
   status: ParseStatus | null;
   protocol: string | null;
+  log_query: LogQuery;
+  order: RecordOrder;
   offset: number;
   limit: number;
   tree: boolean;
@@ -90,6 +92,49 @@ export interface Filters {
   collapsed: string[];
   severity: Severity | null;
   origin: string;
+}
+export type RecordOrder =
+  "original_asc" | "original_desc" | "time_asc" | "time_desc";
+export interface LogFieldQuery {
+  field: string;
+  value: string;
+  mode: "contains" | "equals";
+}
+export interface LogQuery {
+  time_offset: number | null;
+  log_level: string;
+  client_ip: string;
+  http_status: string;
+  method: string;
+  uri: string;
+  logger: string;
+  time_from: string | null;
+  time_until: string | null;
+  event_ids: string;
+  level: string | null;
+  provider: string;
+  channel: string;
+  host: string;
+  fields: LogFieldQuery[];
+}
+export function defaultLogQuery(): LogQuery {
+  return {
+    time_offset: null,
+    log_level: "",
+    client_ip: "",
+    http_status: "",
+    method: "",
+    uri: "",
+    logger: "",
+    time_from: null,
+    time_until: null,
+    event_ids: "",
+    level: null,
+    provider: "",
+    channel: "",
+    host: "",
+    fields: [],
+  };
 }
 export function defaultFilters(): Filters {
   return {
@@ -100,6 +145,8 @@ export function defaultFilters(): Filters {
     category: null,
     status: null,
     protocol: null,
+    log_query: defaultLogQuery(),
+    order: "original_asc",
     offset: 0,
     limit: 100,
     tree: true,

@@ -22,6 +22,8 @@ pub struct RecordFilter {
     pub category: Option<String>,
     pub status: Option<ParseStatus>,
     pub protocol: Option<String>,
+    pub log_query: crate::LogQuery,
+    pub order: crate::RecordOrder,
 }
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum FindingOrigin {
@@ -104,6 +106,7 @@ impl AnalysisSession {
         filter: &RecordFilter,
         ctx: &ExecutionContext,
     ) -> Result<RecordSelection> {
+        let log_query = filter.log_query.prepare()?;
         if let Some(db) = &self.0.store {
             ctx.check()?;
             let version = {
@@ -179,7 +182,45 @@ impl AnalysisSession {
                 {
                     continue;
                 }
+                if !log_query.matches(record) {
+                    continue;
+                }
                 ids.push(id.clone());
+            }
+            match filter.order {
+                crate::RecordOrder::OriginalAsc => {}
+                crate::RecordOrder::OriginalDesc => ids.reverse(),
+                order => {
+                    let mut sorted = ids
+                        .into_iter()
+                        .enumerate()
+                        .map(|(i, id)| {
+                            ctx.tick(Stage::Query, None, i, Some(selection.len()))?;
+                            let record = &r.records[self.0.index[&id]];
+                            Ok((log_query.time(record), self.0.index[&id], id))
+                        })
+                        .collect::<Result<Vec<_>>>()?;
+                    sorted.sort_by(|(a, ai, _), (b, bi, _)| match (a, b) {
+                        (Some(a), Some(b)) => {
+                            if order == crate::RecordOrder::TimeAsc {
+                                a.cmp(b).then(ai.cmp(bi))
+                            } else {
+                                b.cmp(a).then(bi.cmp(ai))
+                            }
+                        }
+                        (Some(_), None) => std::cmp::Ordering::Less,
+                        (None, Some(_)) => std::cmp::Ordering::Greater,
+                        _ => {
+                            if order == crate::RecordOrder::TimeAsc {
+                                ai.cmp(bi)
+                            } else {
+                                bi.cmp(ai)
+                            }
+                        }
+                    });
+                    ctx.check()?;
+                    ids = sorted.into_iter().map(|(_, _, id)| id).collect();
+                }
             }
             self.select_ids(ids)
         })?

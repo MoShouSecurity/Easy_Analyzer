@@ -1,5 +1,6 @@
 use crate::{
     execution::{ExecutionContext, ReportOutcome, Stage, is_cancelled},
+    middleware::ApplicationLogParser,
     model::*,
     web::{WebErrorParser, WebParser},
 };
@@ -504,6 +505,7 @@ fn parse_text(
         .map(WebParser::compile)
         .transpose()?;
     let errors = WebErrorParser::default();
+    let applications = ApplicationLogParser::default();
     let common = WebParser::common();
     let combined = WebParser::combined();
     let failed =
@@ -522,9 +524,12 @@ fn parse_text(
         let mut status = ParseStatus::Parsed;
         let mut fields = BTreeMap::new();
         let category;
-        if custom.is_none() && errors.parse(line).is_some() {
-            fields = errors.parse(line).unwrap();
+        if let Some(parsed) = custom.is_none().then(|| errors.parse(line)).flatten() {
+            fields = parsed;
             category = "web_error";
+        } else if let Some(parsed) = custom.is_none().then(|| applications.parse(line)).flatten() {
+            fields = parsed;
+            category = "application_log";
         } else if format == InputFormat::Web {
             let parsed = if let Some(p) = &custom {
                 p.parse(line)
@@ -565,7 +570,7 @@ fn parse_text(
                     .map(|t| t.to_rfc3339());
             }
         }
-        if category == "web_error" {
+        if category == "web_error" || category == "application_log" {
             timestamp = fields
                 .get("time")
                 .and_then(|s| DateTime::parse_from_rfc3339(s).ok())

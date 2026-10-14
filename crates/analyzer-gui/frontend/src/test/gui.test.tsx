@@ -1412,3 +1412,138 @@ describe("response command navigation", () => {
     },
   );
 });
+
+it("preserves combined log dimensions across order changes and pagination", async () => {
+  const user = userEvent.setup();
+  render(<App />);
+  await waitFor(() => expect(mock.window.onCloseRequested).toHaveBeenCalled());
+  fireEvent.click(screen.getByRole("button", { name: "日志证据" }));
+  await screen.findByText("中文证据记录");
+  fireEvent.click(screen.getByRole("button", { name: "多维查询" }));
+  fireEvent.change(screen.getByLabelText("Windows 事件 ID"), {
+    target: { value: "4624,4625" },
+  });
+  fireEvent.change(screen.getByLabelText("日志通道"), {
+    target: { value: "Security" },
+  });
+  fireEvent.click(screen.getByRole("button", { name: "应用查询" }));
+  await waitFor(() =>
+    expect(screen.queryByRole("dialog")).not.toBeInTheDocument(),
+  );
+  expect(mock.invoke).toHaveBeenCalledWith("get_view", {
+    request: expect.objectContaining({
+      screen: "logs",
+      commit_selection: true,
+      filters: expect.objectContaining({
+        offset: 0,
+        log_query: expect.objectContaining({
+          event_ids: "4624,4625",
+          channel: "Security",
+        }),
+      }),
+    }),
+  });
+  await user.click(screen.getByRole("combobox", { name: "日志排列顺序" }));
+  await user.click(screen.getByRole("option", { name: "时间倒序（新→旧）" }));
+  await waitFor(() =>
+    expect(mock.invoke).toHaveBeenCalledWith("get_view", {
+      request: expect.objectContaining({
+        filters: expect.objectContaining({ order: "time_desc", offset: 0 }),
+      }),
+    }),
+  );
+  await waitFor(() =>
+    expect(screen.getByRole("button", { name: "下一页" })).toBeEnabled(),
+  );
+  fireEvent.click(screen.getByRole("button", { name: "下一页" }));
+  await waitFor(() =>
+    expect(mock.invoke).toHaveBeenCalledWith("get_view", {
+      request: expect.objectContaining({
+        filters: expect.objectContaining({
+          order: "time_desc",
+          offset: 100,
+          log_query: expect.objectContaining({
+            event_ids: "4624,4625",
+            channel: "Security",
+          }),
+        }),
+      }),
+    }),
+  );
+  expect(mock.invoke.mock.calls.some(([c]) => c === "start_ai")).toBe(false);
+});
+
+it("restores legacy log filters with defaults for new query dimensions", async () => {
+  const original = mock.invoke.getMockImplementation()!;
+  mock.invoke.mockImplementation((command, args) =>
+    command === "initialize"
+      ? Promise.resolve({
+          ...boot,
+          filters: {
+            logs: {
+              text: "旧筛选",
+              regex: false,
+              suspicious: false,
+              source: null,
+              category: null,
+              status: null,
+              protocol: null,
+              offset: 0,
+              limit: 100,
+              tree: true,
+              packets: false,
+              flow: null,
+              collapsed: [],
+              severity: null,
+              origin: "all",
+            },
+          },
+        })
+      : original(command, args),
+  );
+  render(<App />);
+  await waitFor(() => expect(mock.window.onCloseRequested).toHaveBeenCalled());
+  fireEvent.click(screen.getByRole("button", { name: "日志证据" }));
+  await screen.findByText("中文证据记录");
+  expect(screen.getByLabelText("查询证据")).toHaveValue("旧筛选");
+  expect(
+    screen.getByRole("combobox", { name: "日志排列顺序" }),
+  ).toHaveTextContent("原始正序");
+  fireEvent.click(screen.getByRole("button", { name: "多维查询" }));
+  expect(screen.getByLabelText("Windows 事件 ID")).toHaveValue("");
+});
+
+it("cancels a pending multidimensional query and ignores its late result", async () => {
+  const original = mock.invoke.getMockImplementation()!;
+  let complete!: () => void;
+  mock.invoke.mockImplementation((command, args) => {
+    if (
+      command === "get_view" &&
+      args.request.filters.log_query.event_ids === "4624"
+    )
+      return new Promise((resolve) => {
+        complete = () => resolve(response(args.request));
+      });
+    return original(command, args);
+  });
+  render(<App />);
+  await waitFor(() => expect(mock.window.onCloseRequested).toHaveBeenCalled());
+  fireEvent.click(screen.getByRole("button", { name: "日志证据" }));
+  await screen.findByText("中文证据记录");
+  fireEvent.click(screen.getByRole("button", { name: "多维查询" }));
+  fireEvent.change(screen.getByLabelText("Windows 事件 ID"), {
+    target: { value: "4624" },
+  });
+  fireEvent.click(screen.getByRole("button", { name: "应用查询" }));
+  fireEvent.click(await screen.findByRole("button", { name: "取消查询" }));
+  await waitFor(() =>
+    expect(screen.queryByRole("dialog")).not.toBeInTheDocument(),
+  );
+  await act(async () => complete());
+  expect(screen.getByRole("button", { name: "多维查询" })).toBeVisible();
+  expect(screen.getByText("中文证据记录")).toBeVisible();
+  const requests = mock.invoke.mock.calls.filter(
+    ([command]) => command === "get_view",
+  );
+  expect(requests.at(-1)![1].request.filters.log_query.event_ids).toBe("");
+});

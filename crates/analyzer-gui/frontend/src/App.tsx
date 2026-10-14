@@ -46,6 +46,7 @@ import { api } from "./lib/api";
 import { basename, bytes, number } from "./lib/utils";
 import {
   defaultFilters,
+  defaultLogQuery,
   evidenceScreen,
   screens,
   sessionScreens,
@@ -70,6 +71,8 @@ import {
   type TaskMessage,
   type SelectionInfo,
   type Severity,
+  type LogQuery,
+  type RecordOrder,
 } from "./types";
 import { Button } from "./components/ui/button";
 import { Select } from "./components/ui/select";
@@ -84,6 +87,13 @@ import { SettingsView } from "./components/SettingsView";
 import { AiHistory } from "./components/AiHistory";
 import { AiLocalSummary } from "./components/AiLocalSummary";
 import { AiEvidenceFilter } from "./components/AiEvidenceFilter";
+import { LogQueryDialog } from "./components/LogQuery";
+import {
+  displayRecordLogTime,
+  logQueryCount,
+  logTypeLabel,
+  logDetail,
+} from "./lib/log-query";
 import {
   ProjectHome,
   ProjectEditor,
@@ -141,9 +151,16 @@ const draftOf = (c: Bootstrap["config"]): ConfigInput => ({
   key_action: "keep",
   key_value: "",
 });
-const initialFilters = () =>
+const initialFilters = (saved?: Bootstrap["filters"]) =>
   Object.fromEntries(
-    sessionScreens.map((s) => [s, defaultFilters()]),
+    sessionScreens.map((s) => [
+      s,
+      {
+        ...defaultFilters(),
+        ...saved?.[s],
+        log_query: { ...defaultLogQuery(), ...saved?.[s]?.log_query },
+      },
+    ]),
   ) as Record<SessionScreen, Filters>;
 const statusText: Record<string, string> = {
   running: "处理中",
@@ -199,6 +216,7 @@ export function App() {
     [aiSending, setAiSending] = useState(false),
     [aiFilter, setAiFilter] = useState<ScopeContext | null>(null),
     [aiFilterBusy, setAiFilterBusy] = useState(false),
+    [logQueryOpen, setLogQueryOpen] = useState(false),
     [aiHistoryOpen, setAiHistoryOpen] = useState(false),
     [aiPreview, setAiPreview] = useState<{
       key: string;
@@ -244,7 +262,7 @@ export function App() {
         f?: Filters,
         focusId?: string | null,
         commit?: boolean,
-      ) => Promise<void>
+      ) => Promise<string | undefined>
     >(async () => {}),
     qaAiStarted = useRef(false);
   projectRef.current = boot?.project;
@@ -296,7 +314,7 @@ export function App() {
           revision !== viewRevision.current ||
           value.session_id !== session.current
         )
-          return;
+          return "会话或查询已更新，请重新应用查询";
         if (value.project)
           setBoot((v) => (v ? { ...v, project: value.project } : v));
         setViews((v) => ({ ...v, [next]: value }));
@@ -320,6 +338,7 @@ export function App() {
           !String(e).includes("已取消")
         )
           setError(String(e));
+        return String(e);
       } finally {
         if (revision === viewRevision.current) setLoading(false);
       }
@@ -393,9 +412,10 @@ export function App() {
             detailRevision.current++;
             setViews({});
             setAiFilter(null);
+            setLogQueryOpen(false);
             setAiPreview(null);
             setExportPath("");
-            setFilters({ ...initialFilters(), ...fresh.filters });
+            setFilters(initialFilters(fresh.filters));
             setDetail(null);
             setFinding(null);
             setSelectedId(null);
@@ -471,6 +491,7 @@ export function App() {
         const fresh = await api.initialize();
         if (disposed) return;
         setBoot(fresh);
+        setFilters(initialFilters(fresh.filters));
         if (fresh.qa) setScreen("import");
         setPrefs(fresh.preferences);
         setDraft(draftOf(fresh.config));
@@ -561,6 +582,7 @@ export function App() {
   }, [screen, sourceOffset, diagnosticOffset, runOffset]);
   const navigate = (next: Screen) => {
     if (next === screen) return;
+    setLogQueryOpen(false);
     if (next === "commands" || screen === "commands") {
       viewRevision.current++;
       setLoading(false);
@@ -582,6 +604,30 @@ export function App() {
     setFilters((v) => ({ ...v, [screen]: updated }));
     setFocus(null);
     void refresh(screen, updated, null, true);
+  };
+  const applyLogQuery = async (log_query: LogQuery) => {
+    if (screen !== "logs" || busy) return;
+    const filter = { ...active, log_query, offset: 0 };
+    const error = await refresh("logs", filter, null, true);
+    if (error) throw new Error(error);
+    setFilters((v) => ({ ...v, logs: filter }));
+    setFocus(null);
+    setLogQueryOpen(false);
+  };
+  const closeLogQuery = () => {
+    setLogQueryOpen(false);
+    if (loading) {
+      const previous =
+        scopeContext.current?.screen === "logs"
+          ? scopeContext.current.filters
+          : currentFilters.current.logs;
+      setFilters((v) => ({ ...v, logs: structuredClone(previous) }));
+      setFocus(null);
+      // A new view revision cancels the previous native read and restores the
+      // last valid selection, including a query that finished just before cancellation.
+      void refresh("logs", previous, null, true);
+      setNotice("已取消日志查询，保留上一次有效范围");
+    }
   };
   const editAiFilter = () => {
     if (!hasSession || busy) return;
@@ -1087,22 +1133,45 @@ export function App() {
       ),
     },
   ];
+  const logEventColumn: ColumnDef<RecordSummary>[] =
+    screen === "logs"
+      ? [
+          {
+            id: "event_id",
+            header: "级别 / 状态 / 事件",
+            size: 105,
+            cell: ({ row }) => (
+              <span className="mono table-muted">
+                {logDetail(row.original)}
+              </span>
+            ),
+          },
+        ]
+      : [];
   const recordsColumns: ColumnDef<RecordSummary>[] = [
     {
       id: "time",
       header: screen === "processes" ? "PID / PPID" : "时间",
-      size: screen === "processes" ? 85 : 115,
+      size: screen === "processes" ? 85 : screen === "logs" ? 160 : 115,
       cell: ({ row }) => {
         const r = row.original;
         return (
-          <span className="mono truncate table-muted" title={r.timestamp || ""}>
+          <span
+            className="mono truncate table-muted"
+            title={
+              screen === "logs" ? displayRecordLogTime(r) : r.timestamp || ""
+            }
+          >
             {r.data.kind === "process"
               ? `${r.data.fields.pid} / ${r.data.fields.parent_pid ?? "—"}`
-              : r.timestamp?.slice(5, 19).replace("T", " ") || "未知"}
+              : screen === "logs"
+                ? displayRecordLogTime(r)
+                : r.timestamp?.slice(5, 19).replace("T", " ") || "未知"}
           </span>
         );
       },
     },
+    ...logEventColumn,
     {
       id: "source",
       header: screen === "processes" ? "快照来源" : "来源",
@@ -1126,7 +1195,7 @@ export function App() {
           ? "关系"
           : screen === "network"
             ? "协议"
-            : "类别",
+            : "事件类型",
       size: screen === "network" ? 56 : 87,
       cell: ({ row }) => {
         const r = row.original;
@@ -1150,7 +1219,7 @@ export function App() {
             }
           >
             {r.data.kind === "log"
-              ? r.data.fields.category
+              ? logTypeLabel(r.data.fields.category)
               : r.data.fields.protocol}
           </span>
         );
@@ -1838,6 +1907,36 @@ export function App() {
                     </Button>
                   </form>
                   <div className="filter-row evidence-filters">
+                    {screen === "logs" && (
+                      <>
+                        <Button
+                          type="button"
+                          variant="secondary"
+                          disabled={!hasSession || busy || loading}
+                          onClick={() => setLogQueryOpen(true)}
+                        >
+                          <SlidersHorizontal size={14} />
+                          多维查询
+                          {logQueryCount(active.log_query) > 0
+                            ? ` (${logQueryCount(active.log_query)})`
+                            : ""}
+                        </Button>
+                        <Select
+                          label="日志排列顺序"
+                          value={active.order}
+                          disabled={loading || busy}
+                          onChange={(order) =>
+                            changeFilters({ order: order as RecordOrder })
+                          }
+                          options={[
+                            { value: "original_asc", label: "原始正序" },
+                            { value: "original_desc", label: "原始倒序" },
+                            { value: "time_asc", label: "时间正序（旧→新）" },
+                            { value: "time_desc", label: "时间倒序（新→旧）" },
+                          ]}
+                        />
+                      </>
+                    )}
                     <Checkbox
                       label="正则"
                       checked={active.regex}
@@ -1869,16 +1968,16 @@ export function App() {
                     />
                     {screen === "logs" && (
                       <Select
-                        label="日志类别"
+                        label="事件类型 / 日志类别"
                         value={active.category || ""}
                         onChange={(category) =>
                           changeFilters({ category: category || null })
                         }
                         options={[
-                          { value: "", label: "全部类别" },
+                          { value: "", label: "全部事件类型" },
                           ...(overview?.categories || []).map((value) => ({
                             value,
-                            label: value,
+                            label: logTypeLabel(value),
                           })),
                         ]}
                       />
@@ -2539,6 +2638,14 @@ export function App() {
             busy={aiFilterBusy}
             onApply={applyAiFilter}
             onClose={() => setAiFilter(null)}
+          />
+        )}
+        {logQueryOpen && screen === "logs" && (
+          <LogQueryDialog
+            initial={active.log_query}
+            busy={loading || busy}
+            onApply={applyLogQuery}
+            onClose={closeLogQuery}
           />
         )}
 

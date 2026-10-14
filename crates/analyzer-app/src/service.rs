@@ -315,6 +315,7 @@ impl AnalysisService {
                                 count,
                                 ids: Default::default(),
                                 lazy: None,
+                                order: crate::RecordOrder::default(),
                                 materialized: Default::default(),
                             })),
                         }

@@ -43,6 +43,8 @@ pub struct Filters {
     pub category: Option<String>,
     pub status: Option<ParseStatus>,
     pub protocol: Option<String>,
+    pub log_query: LogQuery,
+    pub order: RecordOrder,
     pub offset: usize,
     pub limit: usize,
     pub tree: bool,
@@ -62,6 +64,8 @@ impl Default for Filters {
             category: None,
             status: None,
             protocol: None,
+            log_query: LogQuery::default(),
+            order: RecordOrder::default(),
             offset: 0,
             limit: 100,
             tree: true,
@@ -86,6 +90,16 @@ impl Filters {
             category: self.category.clone(),
             status: self.status.clone(),
             protocol: self.protocol.clone(),
+            log_query: if screen == Screen::Logs {
+                self.log_query.clone()
+            } else {
+                LogQuery::default()
+            },
+            order: if screen == Screen::Logs {
+                self.order
+            } else {
+                RecordOrder::default()
+            },
         }
     }
     pub fn finding_filter(&self) -> FindingFilter {
@@ -131,6 +145,50 @@ impl Filters {
         }
         if let Some(v) = self.flow {
             parts.push(format!("会话 #{} 关联包", v + 1));
+        }
+        if screen == Screen::Logs {
+            if let Some(v) = &self.log_query.time_from {
+                parts.push(format!("开始：{v}"));
+            }
+            if let Some(v) = &self.log_query.time_until {
+                parts.push(format!("结束：{v}"));
+            }
+            if !self.log_query.event_ids.trim().is_empty() {
+                parts.push(format!("事件 ID：{}", self.log_query.event_ids));
+            }
+            if let Some(v) = &self.log_query.level {
+                parts.push(format!("事件级别：{v}"));
+            }
+            if let Some(minutes) = self.log_query.time_offset {
+                parts.push(format!("无时区日志偏移：{minutes} 分钟"));
+            }
+            for (label, value) in [
+                ("日志级别", &self.log_query.log_level),
+                ("客户端 IP", &self.log_query.client_ip),
+                ("HTTP 状态码", &self.log_query.http_status),
+                ("请求方法", &self.log_query.method),
+                ("请求路径", &self.log_query.uri),
+                ("Logger", &self.log_query.logger),
+                ("提供程序", &self.log_query.provider),
+                ("通道", &self.log_query.channel),
+                ("主机", &self.log_query.host),
+            ] {
+                if !value.trim().is_empty() {
+                    parts.push(format!("{label}：{value}"));
+                }
+            }
+            for f in &self.log_query.fields {
+                parts.push(format!(
+                    "{} {} {}",
+                    f.field,
+                    if f.mode == FieldMatch::Equals {
+                        "="
+                    } else {
+                        "包含"
+                    },
+                    f.value
+                ));
+            }
         }
         parts.join(" · ")
     }

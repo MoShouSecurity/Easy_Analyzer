@@ -4,6 +4,8 @@ import { Dialog } from "./ui/dialog";
 import { Select } from "./ui/select";
 import { Checkbox } from "./ui/checkbox";
 import { Button } from "./ui/button";
+import { LogQueryFields } from "./LogQuery";
+import { validateLogQuery, logTypeLabel } from "../lib/log-query";
 import { basename } from "../lib/utils";
 import {
   defaultFilters,
@@ -44,6 +46,7 @@ export function AiEvidenceFilter({
     if (busy || composing.current) return;
     setError(null);
     try {
+      if (draft.screen === "logs") validateLogQuery(draft.filters.log_query);
       await onApply(draft);
     } catch (e) {
       setError(String(e));
@@ -171,7 +174,10 @@ export function AiEvidenceFilter({
                 onChange={(category) => change({ category: category || null })}
                 options={[
                   { value: "", label: "全部类别" },
-                  ...categories.map((value) => ({ value, label: value })),
+                  ...categories.map((value) => ({
+                    value,
+                    label: logTypeLabel(value),
+                  })),
                 ]}
               />
             )}
@@ -187,6 +193,16 @@ export function AiEvidenceFilter({
               />
             )}
           </div>
+          {draft.screen === "logs" && (
+            <details className="ai-log-query">
+              <summary>日志多维查询条件</summary>
+              <LogQueryFields
+                value={f.log_query}
+                onChange={(log_query) => change({ log_query })}
+                disabled={busy}
+              />
+            </details>
+          )}
           {f.flow !== null && (
             <div className="ai-filter-flow">
               限定网络会话 #{f.flow + 1}
