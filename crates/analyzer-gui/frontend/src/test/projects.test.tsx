@@ -408,6 +408,143 @@ it("mixes IOC paste and manual inputs and explicitly scans with exact domain pol
   );
 });
 
+it("returns IOC hits to the last valid page after a rescan reduces their total", async () => {
+  let total = 225;
+  mock.invoke.mockImplementation(async (command: string, args: any) => {
+    if (command !== "get_ioc") return undefined;
+    return {
+      status: { indicators: 1, records: 225, needs_rescan: false, run: null },
+      indicators: { offset: args.offset, total: 1, items: [] },
+      hits: {
+        offset: args.hitOffset,
+        total,
+        items: Array.from(
+          { length: Math.min(100, Math.max(0, total - args.hitOffset)) },
+          (_, i) => ({
+            record_id: `r${args.hitOffset + i}`,
+            indicator_id: "ioc",
+            value: "example.com",
+            note: "",
+            matched_value: "example.com",
+            field: "uri",
+            byte_offset: null,
+            position: `hit-${args.hitOffset + i}`,
+          }),
+        ),
+      },
+    };
+  });
+  const props = {
+    sessionId: 7,
+    revision: 1,
+    busy: false,
+    onTask: async () => {},
+    onJump: () => {},
+    onChanged: async () => {},
+    onError: vi.fn(),
+  };
+  const { rerender, container } = render(<IocView {...props} />);
+  await screen.findByRole("button", { name: "hit-0" });
+  const scroll = container.querySelectorAll(".ioc-table-scroll")[1];
+  scroll.scrollTop = 500;
+  fireEvent.click(screen.getByRole("button", { name: "IOC 命中 末页" }));
+  await screen.findByRole("button", { name: "hit-224" });
+  expect(scroll.scrollTop).toBe(0);
+  total = 125;
+  rerender(<IocView {...props} revision={2} />);
+  await screen.findByRole("button", { name: "hit-124" });
+  expect(mock.invoke).toHaveBeenLastCalledWith("get_ioc", {
+    sessionId: 7,
+    offset: 0,
+    hitOffset: 100,
+  });
+  await waitFor(() =>
+    expect(
+      screen.getByRole("spinbutton", { name: "IOC 命中 跳转页码" }),
+    ).toHaveValue(2),
+  );
+  total = 0;
+  rerender(<IocView {...props} revision={3} />);
+  await waitFor(() =>
+    expect(mock.invoke).toHaveBeenLastCalledWith("get_ioc", {
+      sessionId: 7,
+      offset: 0,
+      hitOffset: 0,
+    }),
+  );
+  expect(
+    await within(
+      screen.getByRole("navigation", { name: "IOC 命中分页" }),
+    ).findByText(/0 条 · 第 0 \/ 0 页/),
+  ).toBeVisible();
+  expect(props.onError).not.toHaveBeenCalled();
+});
+
+it("retries failed IOC pages and ignores a response superseded by a refresh", async () => {
+  const makeView = (offset: number, suffix = "") => ({
+    status: { indicators: 225, records: 1, needs_rescan: false, run: null },
+    indicators: {
+      offset,
+      total: 225,
+      items: [
+        {
+          id: `ioc-${offset}`,
+          kind: "domain",
+          value: `item-${offset}${suffix}.test`,
+          note: "",
+        },
+      ],
+    },
+    hits: { offset: 0, total: 0, items: [] },
+  });
+  let attempts = 0;
+  let finishStale!: (value: ReturnType<typeof makeView>) => void;
+  mock.invoke.mockImplementation((command: string, args: any) => {
+    if (command !== "get_ioc") return Promise.resolve();
+    if (args.offset === 100) {
+      attempts++;
+      if (attempts === 1) return Promise.reject(new Error("模拟 IOC 分页失败"));
+      if (attempts === 2)
+        return new Promise((resolve) => {
+          finishStale = resolve;
+        });
+      return Promise.resolve(makeView(100, "-fresh"));
+    }
+    return Promise.resolve(makeView(args.offset));
+  });
+  const props = {
+    sessionId: 7,
+    revision: 1,
+    busy: false,
+    onTask: async () => {},
+    onJump: () => {},
+    onChanged: async () => {},
+    onError: vi.fn(),
+  };
+  const { rerender, container } = render(<IocView {...props} />);
+  await screen.findByLabelText("说明 item-0.test");
+  const scroll = container.querySelector(".ioc-table-scroll")!;
+  scroll.scrollTop = 500;
+  fireEvent.click(screen.getByRole("button", { name: "IOC 清单 下一页" }));
+  await waitFor(() => expect(props.onError).toHaveBeenCalledTimes(1));
+  expect(screen.getByLabelText("说明 item-0.test")).toBeVisible();
+  expect(scroll.scrollTop).toBe(500);
+  fireEvent.click(screen.getByRole("button", { name: "IOC 清单 下一页" }));
+  await waitFor(() => expect(attempts).toBe(2));
+  expect(
+    screen.getByRole("button", { name: "IOC 清单 下一页" }),
+  ).toBeDisabled();
+  rerender(<IocView {...props} revision={2} />);
+  await screen.findByLabelText("说明 item-100-fresh.test");
+  expect(scroll.scrollTop).toBe(0);
+  await act(async () => finishStale(makeView(100, "-stale")));
+  expect(
+    screen.queryByLabelText("说明 item-100-stale.test"),
+  ).not.toBeInTheDocument();
+  expect(screen.getByLabelText("说明 item-100-fresh.test")).toBeVisible();
+  expect(props.onError).toHaveBeenCalledTimes(1);
+});
+
 it("pages projects on the server and resets the page after filtering", async () => {
   const entries = Array.from({ length: 125 }, (_, i) =>
     projectEntry(`合成项目${i}`),

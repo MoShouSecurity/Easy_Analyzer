@@ -39,6 +39,8 @@ export function IocView({
   const [working, setWorking] = useState(false);
   const [loading, setLoading] = useState(false);
   const viewRequest = useRef(0);
+  const indicatorScroll = useRef<HTMLDivElement>(null);
+  const hitScroll = useRef<HTMLDivElement>(null);
   const policySession = useRef<number | null>(null);
   const load = useCallback(async () => {
     const request = ++viewRequest.current;
@@ -46,6 +48,19 @@ export function IocView({
     try {
       const next = await api.ioc(sessionId, offset, hitOffset);
       if (request !== viewRequest.current) return;
+      const nextOffset = Math.min(
+        offset,
+        Math.floor(Math.max(0, next.indicators.total - 1) / 100) * 100,
+      );
+      const nextHitOffset = Math.min(
+        hitOffset,
+        Math.floor(Math.max(0, next.hits.total - 1) / 100) * 100,
+      );
+      if (nextOffset !== offset || nextHitOffset !== hitOffset) {
+        setOffset(nextOffset);
+        setHitOffset(nextHitOffset);
+        return;
+      }
       if (policySession.current !== sessionId) {
         policySession.current = sessionId;
         setSubdomains(next.status.run?.include_subdomains ?? true);
@@ -63,6 +78,12 @@ export function IocView({
       viewRequest.current++;
     };
   }, [load, revision]);
+  useEffect(() => {
+    if (indicatorScroll.current) indicatorScroll.current.scrollTop = 0;
+  }, [view?.indicators.offset]);
+  useEffect(() => {
+    if (hitScroll.current) hitScroll.current.scrollTop = 0;
+  }, [view?.hits.offset]);
   const add = async (input: IocInput) => {
     setWorking(true);
     try {
@@ -211,7 +232,7 @@ export function IocView({
             {view.status.run.include_subdomains ? "包含子域名" : "精确域名"}
           </p>
         )}
-        <div className="ioc-table-scroll">
+        <div className="ioc-table-scroll" ref={indicatorScroll}>
           <table className="project-table">
             <thead>
               <tr>
@@ -261,7 +282,7 @@ export function IocView({
       </section>
       <section>
         <h2>匹配结果 · 待核查线索</h2>
-        <div className="ioc-table-scroll">
+        <div className="ioc-table-scroll" ref={hitScroll}>
           <table className="project-table">
             <thead>
               <tr>

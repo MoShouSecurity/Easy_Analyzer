@@ -220,4 +220,56 @@ mod tests {
             "a subsequent page must seek from a recent bookmark rather than rescan the preceding thousands of rows"
         );
     }
+
+    #[test]
+    fn mixed_random_seeks_match_sql_after_bookmark_eviction() {
+        let c = Connection::open_in_memory().unwrap();
+        c.execute_batch("CREATE TABLE t(ordinal INTEGER PRIMARY KEY,kind INTEGER); WITH RECURSIVE n(x) AS (VALUES(1) UNION ALL SELECT x+1 FROM n WHERE x<1500) INSERT INTO t SELECT x*x+x,x%3 FROM n;").unwrap();
+        for descending in [false, true] {
+            for filtered in [false, true] {
+                let condition = if filtered { "kind=?" } else { "1=1" };
+                let args = if filtered {
+                    vec![Value::Integer(1)]
+                } else {
+                    vec![]
+                };
+                let direction = if descending { "DESC" } else { "ASC" };
+                let expected = c
+                    .prepare(&format!(
+                        "SELECT ordinal FROM t WHERE {condition} ORDER BY ordinal {direction}"
+                    ))
+                    .unwrap()
+                    .query_map(rusqlite::params_from_iter(&args), |r| r.get::<_, i64>(0))
+                    .unwrap()
+                    .collect::<rusqlite::Result<Vec<_>>>()
+                    .unwrap();
+                let mut pager = OrdinalPager::default();
+                let mut seed = 17_u64;
+                for n in 0..2000 {
+                    seed = seed.wrapping_mul(6364136223846793005).wrapping_add(1);
+                    let offset = if n < 300 {
+                        n
+                    } else {
+                        (seed >> 32) as usize % (expected.len() + 10)
+                    };
+                    assert_eq!(
+                        pager
+                            .boundary(
+                                &c,
+                                "t",
+                                condition,
+                                &args,
+                                "ordinal",
+                                descending,
+                                expected.len(),
+                                offset
+                            )
+                            .unwrap(),
+                        expected.get(offset).copied()
+                    );
+                    assert!(pager.anchors.len() <= 128);
+                }
+            }
+        }
+    }
 }

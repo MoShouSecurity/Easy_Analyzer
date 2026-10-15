@@ -522,6 +522,7 @@ impl Database {
         page_limit(limit)?;
         let c = self.lock()?;
         let mut membership = selection.membership();
+        let table = membership.table();
         let descending = selection.order == RecordOrder::OriginalDesc;
         let mut pager = selection
             .pager
@@ -529,7 +530,7 @@ impl Database {
             .map_err(|_| anyhow!("分页缓存不可用"))?;
         let boundary = pager.boundary(
             &c,
-            "records r",
+            &table,
             &membership.predicate,
             &membership.arguments,
             "r.ordinal",
@@ -547,7 +548,7 @@ impl Database {
                 "COALESCE(NULLIF(r.preview,''),r.data)"
             };
             let comparison = if descending { "<=" } else { ">=" };
-            let mut stmt = c.prepare(&format!("SELECT r.id,r.source_id,r.timestamp,r.status,{data},r.summary,r.ordinal FROM records r WHERE {} AND r.ordinal{comparison}? ORDER BY {} LIMIT ?", membership.predicate, selection.order.sql()))?;
+            let mut stmt = c.prepare(&format!("SELECT r.id,r.source_id,r.timestamp,r.status,{data},r.summary,r.ordinal FROM {table} WHERE {} AND r.ordinal{comparison}? ORDER BY {} LIMIT ?", membership.predicate, selection.order.sql()))?;
             let mut rows = stmt.query(rusqlite::params_from_iter(&membership.arguments))?;
             while let Some(r) = rows.next()? {
                 pager.remember(offset + items.len(), r.get(6)?);
@@ -567,6 +568,7 @@ impl Database {
     ) -> Result<Option<usize>> {
         let c = self.lock()?;
         let membership = selection.membership();
+        let table = membership.table();
         let mut args = vec![rusqlite::types::Value::Text(id.into())];
         args.extend(membership.arguments.clone());
         let ordinal = c
@@ -585,7 +587,7 @@ impl Database {
                 args.push(ordinal.into());
                 Ok(c.query_row(
                     &format!(
-                        "SELECT COUNT(*) FROM records r WHERE {} AND r.ordinal{}?",
+                        "SELECT COUNT(*) FROM {table} WHERE {} AND r.ordinal{}?",
                         membership.predicate,
                         if selection.order == RecordOrder::OriginalDesc {
                             ">"
@@ -618,6 +620,18 @@ pub(crate) struct StoredSelection {
 pub(crate) struct SqlSelection {
     pub predicate: String,
     pub arguments: Vec<rusqlite::types::Value>,
+    pub index: Option<&'static str>,
+}
+fn record_table(index: Option<&str>) -> String {
+    index.map_or_else(
+        || "records r".into(),
+        |name| format!("records r INDEXED BY {name}"),
+    )
+}
+impl SqlSelection {
+    fn table(&self) -> String {
+        record_table(self.index)
+    }
 }
 impl StoredSelection {
     pub fn membership(&self) -> SqlSelection {
@@ -625,9 +639,10 @@ impl StoredSelection {
             SqlSelection {
                 predicate: lazy.predicate.clone(),
                 arguments: lazy.arguments.clone(),
+                index: lazy.index,
             }
         } else {
-            SqlSelection { predicate: "EXISTS(SELECT 1 FROM selection_refs s WHERE s.selection_id=? AND s.record_id=r.id)".into(), arguments: vec![self.id.into()] }
+            SqlSelection { predicate: "EXISTS(SELECT 1 FROM selection_refs s WHERE s.selection_id=? AND s.record_id=r.id)".into(), arguments: vec![self.id.into()], index: None }
         }
     }
     pub fn materialize(&self, ctx: &ExecutionContext) -> Result<i64> {
@@ -638,8 +653,9 @@ impl StoredSelection {
             let mut c = self.db.lock()?;
             if self.materialized.get().is_none() {
                 let tx = c.transaction()?;
+                let table = lazy.table();
                 let sql = format!(
-                    "INSERT INTO selection_refs SELECT {},ROW_NUMBER() OVER(ORDER BY {})-1,r.id FROM records r WHERE {}",
+                    "INSERT INTO selection_refs SELECT {},ROW_NUMBER() OVER(ORDER BY {})-1,r.id FROM {table} WHERE {}",
                     self.id,
                     self.order.sql(),
                     lazy.predicate
@@ -685,6 +701,7 @@ impl Database {
         let order_sql = filter.order.query_sql(filter.log_query.time_offset);
         let mut clauses = vec!["1=1".to_string()];
         let mut args: Vec<Value> = vec![];
+        let mut indexes = vec![];
         for (column, value) in [
             (
                 "kind",
@@ -701,6 +718,15 @@ impl Database {
             ("status", filter.status.as_ref().map(json).transpose()?),
         ] {
             if let Some(v) = value {
+                let index = match column {
+                    "kind" => "record_kind",
+                    "source_id" => "record_source",
+                    "category" => "record_category",
+                    "protocol" => "record_protocol",
+                    "status" => "record_status",
+                    _ => unreachable!(),
+                };
+                indexes.push((index, column, Value::Text(v.clone())));
                 args.push(v.into());
                 clauses.push(format!("r.{column}=?"));
             }
@@ -720,6 +746,28 @@ impl Database {
         }
         let mut c = self.lock()?;
         let tx = c.transaction()?;
+        // Without ANALYZE, SQLite can choose the broad kind index for a tiny
+        // source or category. Compare cached covering-index counts once, then
+        // keep the chosen index for the frozen selection and all its pages.
+        let index = with_progress(&tx, ctx, || {
+            let mut best = None;
+            for (index, column, value) in &indexes {
+                let count = if indexes.len() == 1 {
+                    0
+                } else {
+                    self.cached_count(
+                        &tx,
+                        &format!("SELECT COUNT(*) FROM records WHERE {column}=?"),
+                        std::slice::from_ref(value),
+                    )?
+                };
+                if best.is_none_or(|(_, old)| count < old) {
+                    best = Some((*index, count));
+                }
+            }
+            Ok(best.map(|(index, _)| index))
+        })?;
+        let table = record_table(index);
         // Records are append-only. The upper ordinal freezes a typed selection
         // without copying every ID; text and finding-dependent selections stay materialized.
         let lazy = search.is_none()
@@ -742,7 +790,7 @@ impl Database {
             with_progress(&tx, ctx, || {
                 let mut count = 0;
                 let mut s = tx.prepare(&format!(
-                    "SELECT id,raw,data FROM records r WHERE {where_sql} ORDER BY {}",
+                    "SELECT id,raw,data FROM {table} WHERE {where_sql} ORDER BY {}",
                     order_sql
                 ))?;
                 let mut rows = s.query(rusqlite::params_from_iter(args.iter()))?;
@@ -765,14 +813,14 @@ impl Database {
         } else if lazy {
             with_progress(&tx, ctx, || {
                 Ok(tx.query_row(
-                    &format!("SELECT COUNT(*) FROM records r WHERE {where_sql}"),
+                    &format!("SELECT COUNT(*) FROM {table} WHERE {where_sql}"),
                     rusqlite::params_from_iter(&args),
                     |r| r.get::<_, i64>(0),
                 )? as usize)
             })?
         } else {
             let sql = format!(
-                "INSERT INTO selection_refs SELECT {id},ROW_NUMBER() OVER(ORDER BY {})-1,r.id FROM records r WHERE {where_sql}",
+                "INSERT INTO selection_refs SELECT {id},ROW_NUMBER() OVER(ORDER BY {})-1,r.id FROM {table} WHERE {where_sql}",
                 order_sql
             );
             with_progress(&tx, ctx, || {
@@ -796,6 +844,7 @@ impl Database {
                 lazy: lazy.then_some(SqlSelection {
                     predicate: where_sql,
                     arguments: args,
+                    index,
                 }),
                 order: filter.order,
                 pager: Mutex::default(),
@@ -1211,6 +1260,7 @@ impl Database {
             .unwrap_or(SqlSelection {
                 predicate: "1=1".into(),
                 arguments: vec![],
+                index: None,
             });
         let mut args = vec![id.into(), ((key + 1) as i64).into()];
         args.extend(membership.arguments);
