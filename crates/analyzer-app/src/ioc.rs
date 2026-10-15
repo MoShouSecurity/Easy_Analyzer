@@ -3,7 +3,7 @@ use crate::{
         self,
         ioc::{Indicator, IocMatcher},
     },
-    storage::{Database, json, scalar, values},
+    storage::{Database, json, values},
     *,
 };
 use anyhow::{Result, anyhow, bail};
@@ -214,14 +214,28 @@ impl IocService {
         limit: usize,
     ) -> Result<Page<Indicator>> {
         crate::storage::page_limit(limit)?;
-        let c = store(session)?.lock()?;
+        let db = store(session)?;
+        let c = db.lock()?;
         Ok(Page {
             offset,
-            total: scalar(&c, "SELECT COUNT(*) FROM iocs")?,
+            total: db.cached_count(&c, "SELECT COUNT(*) FROM iocs", &[])?,
             items: values(
                 &c,
-                "SELECT json FROM iocs ORDER BY rowid LIMIT ?1 OFFSET ?2",
-                params![limit as i64, offset.min(i64::MAX as usize) as i64],
+                "SELECT json FROM iocs WHERE rowid>=?1 ORDER BY rowid LIMIT ?2",
+                params![
+                    db.page_boundary(
+                        &c,
+                        "iocs",
+                        "1=1",
+                        &[],
+                        "rowid",
+                        false,
+                        db.cached_count(&c, "SELECT COUNT(*) FROM iocs", &[])?,
+                        offset
+                    )?
+                    .unwrap_or(i64::MAX),
+                    limit as i64
+                ],
             )?,
         })
     }
@@ -256,12 +270,13 @@ impl IocService {
         Ok(())
     }
     pub fn status(session: &AnalysisSession) -> Result<IocStatus> {
-        let c = store(session)?.lock()?;
+        let db = store(session)?;
+        let c = db.lock()?;
         let runs: Vec<IocRun> =
             values(&c, "SELECT json FROM ioc_runs ORDER BY id DESC LIMIT 1", [])?;
         let run = runs.into_iter().next();
-        let records = scalar(&c, "SELECT COUNT(*) FROM records")?;
-        let indicators = scalar(&c, "SELECT COUNT(*) FROM iocs")?;
+        let records = db.cached_count(&c, "SELECT COUNT(*) FROM records", &[])?;
+        let indicators = db.cached_count(&c, "SELECT COUNT(*) FROM iocs", &[])?;
         let revision = Database::get::<u64>(&c, "ioc_revision").unwrap_or(0);
         let needs_rescan = indicators > 0
             && run.as_ref().is_none_or(|r| {
@@ -276,14 +291,28 @@ impl IocService {
     }
     pub fn matches(session: &AnalysisSession, offset: usize, limit: usize) -> Result<Page<IocHit>> {
         crate::storage::page_limit(limit)?;
-        let c = store(session)?.lock()?;
+        let db = store(session)?;
+        let c = db.lock()?;
         Ok(Page {
             offset,
-            total: scalar(&c, "SELECT COUNT(*) FROM ioc_matches")?,
+            total: db.cached_count(&c, "SELECT COUNT(*) FROM ioc_matches", &[])?,
             items: values(
                 &c,
-                "SELECT json FROM ioc_matches ORDER BY ordinal LIMIT ?1 OFFSET ?2",
-                params![limit as i64, offset.min(i64::MAX as usize) as i64],
+                "SELECT json FROM ioc_matches WHERE ordinal>=?1 ORDER BY ordinal LIMIT ?2",
+                params![
+                    db.page_boundary(
+                        &c,
+                        "ioc_matches",
+                        "1=1",
+                        &[],
+                        "ordinal",
+                        false,
+                        db.cached_count(&c, "SELECT COUNT(*) FROM ioc_matches", &[])?,
+                        offset
+                    )?
+                    .unwrap_or(i64::MAX),
+                    limit as i64
+                ],
             )?,
         })
     }
@@ -298,7 +327,7 @@ impl IocService {
             let c = db.lock()?;
             (
                 values::<Indicator>(&c, "SELECT json FROM iocs ORDER BY id", [])?,
-                scalar(&c, "SELECT COUNT(*) FROM records")?,
+                db.cached_count(&c, "SELECT COUNT(*) FROM records", &[])?,
                 Database::get::<u64>(&c, "ioc_revision").unwrap_or(0),
             )
         };

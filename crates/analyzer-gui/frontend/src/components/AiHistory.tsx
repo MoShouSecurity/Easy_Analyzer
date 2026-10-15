@@ -1,4 +1,4 @@
-import { useState, useRef } from "react";
+import { useState, useRef, useEffect } from "react";
 import {
   History,
   ChevronDown,
@@ -8,7 +8,7 @@ import {
 } from "lucide-react";
 import { api } from "../lib/api";
 import { number } from "../lib/utils";
-import { Button } from "./ui/button";
+import { Pagination } from "./Pagination";
 import { AiLocalSummary } from "./AiLocalSummary";
 import type { RunSummary, AiBatch, Page } from "../types";
 export function AiHistory({
@@ -17,8 +17,10 @@ export function AiHistory({
   onOffset,
   onError,
   initiallyOpen = false,
+  busy = false,
 }: {
   initiallyOpen?: boolean;
+  busy?: boolean;
   runs: Page<RunSummary> | undefined;
   sessionId: number;
   onOffset: (v: number) => void;
@@ -29,10 +31,16 @@ export function AiHistory({
     [batches, setBatches] = useState<Page<AiBatch> | null>(null),
     [loading, setLoading] = useState(false);
   const revision = useRef(0);
+  useEffect(
+    () => () => {
+      revision.current++;
+    },
+    [sessionId],
+  );
   async function load(run: number, offset = 0) {
     const current = ++revision.current;
     setExpanded(run);
-    setBatches(null);
+    if (expanded !== run) setBatches(null);
     setLoading(true);
     try {
       const page = await api.batches(sessionId, run, offset);
@@ -110,51 +118,34 @@ export function AiHistory({
                     ))
                   )}
                   {batches && (
-                    <div className="history-pager">
-                      <Button
-                        size="sm"
-                        variant="ghost"
-                        disabled={batches.offset === 0}
-                        onClick={() =>
-                          load(run.index, Math.max(0, batches.offset - 10))
-                        }
-                      >
-                        上一组批次
-                      </Button>
-                      <Button
-                        size="sm"
-                        variant="ghost"
-                        disabled={batches.offset + 10 >= batches.total}
-                        onClick={() => load(run.index, batches.offset + 10)}
-                      >
-                        下一组批次
-                      </Button>
-                    </div>
+                    <Pagination
+                      label="AI 批次"
+                      offset={batches.offset}
+                      total={batches.total}
+                      limit={10}
+                      loading={loading || busy}
+                      onPage={(offset) => void load(run.index, offset)}
+                    />
                   )}
                 </div>
               )}
             </div>
           ))}
           {!runs?.items.length && <p className="muted">尚未运行 AI 分析。</p>}
-          {runs && runs.total > 20 && (
-            <div className="history-pager">
-              <Button
-                variant="ghost"
-                size="sm"
-                disabled={!runs.offset}
-                onClick={() => onOffset(Math.max(0, runs.offset - 20))}
-              >
-                上一组运行
-              </Button>
-              <Button
-                variant="ghost"
-                size="sm"
-                disabled={runs.offset + 20 >= runs.total}
-                onClick={() => onOffset(runs.offset + 20)}
-              >
-                下一组运行
-              </Button>
-            </div>
+          {runs && (
+            <Pagination
+              label="AI 运行"
+              offset={runs.offset}
+              total={runs.total}
+              limit={20}
+              loading={busy}
+              onPage={(offset) => {
+                revision.current++;
+                setExpanded(null);
+                setBatches(null);
+                onOffset(offset);
+              }}
+            />
           )}
         </div>
       )}

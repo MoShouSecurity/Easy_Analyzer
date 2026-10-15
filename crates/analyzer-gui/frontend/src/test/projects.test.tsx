@@ -5,6 +5,7 @@ import {
   waitFor,
   cleanup,
   within,
+  act,
 } from "@testing-library/react";
 import { afterEach, beforeEach, it, vi, expect } from "vitest";
 import {
@@ -109,14 +110,18 @@ it("validates response times and preserves metadata until accepted", async () =>
   expect(screen.getByLabelText("项目名称")).toHaveValue("合成项目");
 });
 it("searches project metadata and clearly identifies missing files", async () => {
-  mock.invoke.mockResolvedValue([
-    {
-      info: { ...newProject(), name: "合成响应", client: "合成客户" },
-      path: "/tmp/moved.eair",
-      last_opened: "2026-10-05T10:00:00Z",
-      missing: true,
-    },
-  ]);
+  mock.invoke.mockResolvedValue({
+    offset: 0,
+    total: 1,
+    items: [
+      {
+        info: { ...newProject(), name: "合成响应", client: "合成客户" },
+        path: "/tmp/moved.eair",
+        last_opened: "2026-10-05T10:00:00Z",
+        missing: true,
+      },
+    ],
+  });
   render(
     <ProjectHome
       busy={false}
@@ -133,12 +138,90 @@ it("searches project metadata and clearly identifies missing files", async () =>
   });
   await waitFor(() =>
     expect(mock.invoke).toHaveBeenCalledWith(
-      "project_list",
+      "project_list_page",
       expect.objectContaining({
         search: expect.objectContaining({ text: "合成" }),
       }),
     ),
   );
+});
+
+it.each([
+  ["响应开始时间（含时区） *", "2026-10-14T09:00:00", "响应开始时间"],
+  ["响应结束时间（含时区）", "invalid", "响应结束时间"],
+])(
+  "rejects invalid editing time in %s before applying",
+  async (label, value, error) => {
+    const save = vi.fn();
+    render(
+      <ProjectEditor
+        mode="edit"
+        info={{ ...newProject(), name: "合成响应", client: "合成客户" }}
+        busy={false}
+        onClose={() => {}}
+        onSave={save}
+      />,
+    );
+    fireEvent.change(screen.getByLabelText(label), { target: { value } });
+    fireEvent.click(screen.getByRole("button", { name: "应用修改" }));
+    expect(await screen.findByRole("alert")).toHaveTextContent(error);
+    expect(save).not.toHaveBeenCalled();
+  },
+);
+
+it("blocks duplicate editing requests and preserves the draft on failure", async () => {
+  let reject!: (reason: string) => void;
+  const save = vi.fn(
+    () =>
+      new Promise<void>((_, fail) => {
+        reject = fail;
+      }),
+  );
+  const close = vi.fn();
+  render(
+    <ProjectEditor
+      mode="edit"
+      info={{ ...newProject(), name: "合成响应", client: "合成客户" }}
+      busy={false}
+      onClose={close}
+      onSave={save}
+    />,
+  );
+  const name = screen.getByLabelText("项目名称");
+  fireEvent.change(name, { target: { value: "更新后的响应" } });
+  fireEvent.submit(name.closest("form")!);
+  fireEvent.submit(name.closest("form")!);
+  expect(save).toHaveBeenCalledTimes(1);
+  expect(name).toBeDisabled();
+  expect(screen.getByRole("button", { name: "取消" })).toBeDisabled();
+  fireEvent.click(screen.getByRole("button", { name: "关闭" }));
+  expect(close).not.toHaveBeenCalled();
+  await act(async () => reject("合成应用失败"));
+  expect(await screen.findByRole("alert")).toHaveTextContent("合成应用失败");
+  expect(name).toHaveValue("更新后的响应");
+  expect(screen.getByRole("button", { name: "应用修改" })).toBeEnabled();
+});
+
+it("cancels project edits without modifying the original metadata", () => {
+  const info = { ...newProject(), name: "原项目", client: "原客户" };
+  const close = vi.fn();
+  const save = vi.fn();
+  render(
+    <ProjectEditor
+      mode="edit"
+      info={info}
+      busy={false}
+      onClose={close}
+      onSave={save}
+    />,
+  );
+  fireEvent.change(screen.getByLabelText("项目名称"), {
+    target: { value: "取消的修改" },
+  });
+  fireEvent.click(screen.getByRole("button", { name: "取消" }));
+  expect(close).toHaveBeenCalledTimes(1);
+  expect(save).not.toHaveBeenCalled();
+  expect(info.name).toBe("原项目");
 });
 function projectEntry(name: string): ProjectEntry {
   return {
@@ -160,7 +243,8 @@ it("requires confirmation to remove only the selected catalog entry and refreshe
   const b = projectEntry("合成响应乙");
   let entries = [a, b];
   mock.invoke.mockImplementation(async (command: string) => {
-    if (command === "project_list") return entries;
+    if (command === "project_list_page")
+      return { offset: 0, total: entries.length, items: entries };
     if (command === "project_remove") entries = [b];
   });
   render(<ProjectHome {...homeProps} />);
@@ -192,14 +276,17 @@ it("requires confirmation to remove only the selected catalog entry and refreshe
   await screen.findByText("按最近打开排序 · 1 个项目");
   await waitFor(() =>
     expect(
-      mock.invoke.mock.calls.filter(([command]) => command === "project_list"),
+      mock.invoke.mock.calls.filter(
+        ([command]) => command === "project_list_page",
+      ),
     ).toHaveLength(2),
   );
 });
 it("preserves the list and displays errors when removal fails", async () => {
   const entry = projectEntry("合成响应");
   mock.invoke.mockImplementation(async (command: string) => {
-    if (command === "project_list") return [entry];
+    if (command === "project_list_page")
+      return { offset: 0, total: 1, items: [entry] };
     if (command === "project_remove") throw new Error("项目目录不可用");
   });
   render(<ProjectHome {...homeProps} />);
@@ -217,7 +304,12 @@ it("allows missing entries to be removed and prevents duplicate requests while p
   let finish!: () => void;
   let entries = [entry];
   mock.invoke.mockImplementation((command: string) => {
-    if (command === "project_list") return Promise.resolve(entries);
+    if (command === "project_list_page")
+      return Promise.resolve({
+        offset: 0,
+        total: entries.length,
+        items: entries,
+      });
     if (command === "project_remove")
       return new Promise<void>((resolve) => {
         finish = () => {
@@ -313,5 +405,214 @@ it("mixes IOC paste and manual inputs and explicitly scans with exact domain pol
       sessionId: 7,
       includeSubdomains: false,
     }),
+  );
+});
+
+it("returns IOC hits to the last valid page after a rescan reduces their total", async () => {
+  let total = 225;
+  mock.invoke.mockImplementation(async (command: string, args: any) => {
+    if (command !== "get_ioc") return undefined;
+    return {
+      status: { indicators: 1, records: 225, needs_rescan: false, run: null },
+      indicators: { offset: args.offset, total: 1, items: [] },
+      hits: {
+        offset: args.hitOffset,
+        total,
+        items: Array.from(
+          { length: Math.min(100, Math.max(0, total - args.hitOffset)) },
+          (_, i) => ({
+            record_id: `r${args.hitOffset + i}`,
+            indicator_id: "ioc",
+            value: "example.com",
+            note: "",
+            matched_value: "example.com",
+            field: "uri",
+            byte_offset: null,
+            position: `hit-${args.hitOffset + i}`,
+          }),
+        ),
+      },
+    };
+  });
+  const props = {
+    sessionId: 7,
+    revision: 1,
+    busy: false,
+    onTask: async () => {},
+    onJump: () => {},
+    onChanged: async () => {},
+    onError: vi.fn(),
+  };
+  const { rerender, container } = render(<IocView {...props} />);
+  await screen.findByRole("button", { name: "hit-0" });
+  const scroll = container.querySelectorAll(".ioc-table-scroll")[1];
+  scroll.scrollTop = 500;
+  fireEvent.click(screen.getByRole("button", { name: "IOC 命中 末页" }));
+  await screen.findByRole("button", { name: "hit-224" });
+  expect(scroll.scrollTop).toBe(0);
+  total = 125;
+  rerender(<IocView {...props} revision={2} />);
+  await screen.findByRole("button", { name: "hit-124" });
+  expect(mock.invoke).toHaveBeenLastCalledWith("get_ioc", {
+    sessionId: 7,
+    offset: 0,
+    hitOffset: 100,
+  });
+  await waitFor(() =>
+    expect(
+      screen.getByRole("spinbutton", { name: "IOC 命中 跳转页码" }),
+    ).toHaveValue(2),
+  );
+  total = 0;
+  rerender(<IocView {...props} revision={3} />);
+  await waitFor(() =>
+    expect(mock.invoke).toHaveBeenLastCalledWith("get_ioc", {
+      sessionId: 7,
+      offset: 0,
+      hitOffset: 0,
+    }),
+  );
+  expect(
+    await within(
+      screen.getByRole("navigation", { name: "IOC 命中分页" }),
+    ).findByText(/0 条 · 第 0 \/ 0 页/),
+  ).toBeVisible();
+  expect(props.onError).not.toHaveBeenCalled();
+});
+
+it("retries failed IOC pages and ignores a response superseded by a refresh", async () => {
+  const makeView = (offset: number, suffix = "") => ({
+    status: { indicators: 225, records: 1, needs_rescan: false, run: null },
+    indicators: {
+      offset,
+      total: 225,
+      items: [
+        {
+          id: `ioc-${offset}`,
+          kind: "domain",
+          value: `item-${offset}${suffix}.test`,
+          note: "",
+        },
+      ],
+    },
+    hits: { offset: 0, total: 0, items: [] },
+  });
+  let attempts = 0;
+  let finishStale!: (value: ReturnType<typeof makeView>) => void;
+  mock.invoke.mockImplementation((command: string, args: any) => {
+    if (command !== "get_ioc") return Promise.resolve();
+    if (args.offset === 100) {
+      attempts++;
+      if (attempts === 1) return Promise.reject(new Error("模拟 IOC 分页失败"));
+      if (attempts === 2)
+        return new Promise((resolve) => {
+          finishStale = resolve;
+        });
+      return Promise.resolve(makeView(100, "-fresh"));
+    }
+    return Promise.resolve(makeView(args.offset));
+  });
+  const props = {
+    sessionId: 7,
+    revision: 1,
+    busy: false,
+    onTask: async () => {},
+    onJump: () => {},
+    onChanged: async () => {},
+    onError: vi.fn(),
+  };
+  const { rerender, container } = render(<IocView {...props} />);
+  await screen.findByLabelText("说明 item-0.test");
+  const scroll = container.querySelector(".ioc-table-scroll")!;
+  scroll.scrollTop = 500;
+  fireEvent.click(screen.getByRole("button", { name: "IOC 清单 下一页" }));
+  await waitFor(() => expect(props.onError).toHaveBeenCalledTimes(1));
+  expect(screen.getByLabelText("说明 item-0.test")).toBeVisible();
+  expect(scroll.scrollTop).toBe(500);
+  fireEvent.click(screen.getByRole("button", { name: "IOC 清单 下一页" }));
+  await waitFor(() => expect(attempts).toBe(2));
+  expect(
+    screen.getByRole("button", { name: "IOC 清单 下一页" }),
+  ).toBeDisabled();
+  rerender(<IocView {...props} revision={2} />);
+  await screen.findByLabelText("说明 item-100-fresh.test");
+  expect(scroll.scrollTop).toBe(0);
+  await act(async () => finishStale(makeView(100, "-stale")));
+  expect(
+    screen.queryByLabelText("说明 item-100-stale.test"),
+  ).not.toBeInTheDocument();
+  expect(screen.getByLabelText("说明 item-100-fresh.test")).toBeVisible();
+  expect(props.onError).toHaveBeenCalledTimes(1);
+});
+
+it("pages projects on the server and resets the page after filtering", async () => {
+  const entries = Array.from({ length: 125 }, (_, i) =>
+    projectEntry(`合成项目${i}`),
+  );
+  mock.invoke.mockImplementation(async (command: string, args: any) =>
+    command === "project_list_page"
+      ? {
+          offset: args.offset,
+          total: 125,
+          items: entries.slice(args.offset, args.offset + args.limit),
+        }
+      : undefined,
+  );
+  render(<ProjectHome {...homeProps} />);
+  await screen.findByText("合成项目0");
+  fireEvent.click(screen.getByRole("button", { name: "项目 下一页" }));
+  await screen.findByText("合成项目50");
+  expect(mock.invoke).toHaveBeenCalledWith(
+    "project_list_page",
+    expect.objectContaining({ offset: 50, limit: 50 }),
+  );
+  fireEvent.click(screen.getByRole("button", { name: "项目 末页" }));
+  await screen.findByText("合成项目124");
+  fireEvent.change(screen.getByLabelText("项目搜索"), {
+    target: { value: "筛选" },
+  });
+  await waitFor(() =>
+    expect(mock.invoke).toHaveBeenCalledWith(
+      "project_list_page",
+      expect.objectContaining({
+        offset: 0,
+        search: expect.objectContaining({ text: "筛选" }),
+      }),
+    ),
+  );
+});
+
+it("keeps the displayed project page after failure and retries the same next page", async () => {
+  const entries = Array.from({ length: 75 }, (_, i) =>
+    projectEntry(`项目${i}`),
+  );
+  const error = vi.fn();
+  let failed = false;
+  mock.invoke.mockImplementation(async (command: string, args: any) => {
+    if (command !== "project_list_page") return undefined;
+    if (args.offset === 50 && !failed) {
+      failed = true;
+      throw new Error("模拟分页故障");
+    }
+    return {
+      offset: args.offset,
+      total: entries.length,
+      items: entries.slice(args.offset, args.offset + args.limit),
+    };
+  });
+  render(<ProjectHome {...homeProps} onError={error} />);
+  await screen.findByText("项目0");
+  fireEvent.click(screen.getByRole("button", { name: "项目 下一页" }));
+  await waitFor(() => expect(error).toHaveBeenCalled());
+  expect(screen.getByText("项目0")).toBeVisible();
+  expect(screen.getByRole("spinbutton", { name: "项目 跳转页码" })).toHaveValue(
+    1,
+  );
+  fireEvent.click(screen.getByRole("button", { name: "项目 下一页" }));
+  await screen.findByText("项目50");
+  await waitFor(() =>
+    expect(
+      screen.getByRole("spinbutton", { name: "项目 跳转页码" }),
+    ).toHaveValue(2),
   );
 });

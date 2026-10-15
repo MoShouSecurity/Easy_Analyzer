@@ -87,6 +87,12 @@ The macOS GUI currently uses an ad-hoc signature and is not notarized. See the p
 5. For AI assistance, configure the service URL, model, and API key in settings. Select an evidence scope, review the sending preview, and start analysis.
 6. Click “保存” (Save) to write the `.eair` file, and export HTML/JSON reports as needed. Open “应急响应命令” (Response commands) from the left sidebar at any time.
 
+After opening a project, use “编辑资料” (Edit details) in the toolbar or “编辑项目资料” (Edit project details) on the home page to change its name, client organization, response start/end times, location, responders, and description. Click “应用修改” (Apply changes), then “保存” (Save) to write the changes to the project file.
+
+On “日志证据” (Log evidence), “多维查询” combines time ranges, levels, client IPs, HTTP status codes, methods, paths, loggers, hosts, and custom fields for Nginx/Apache, common Tomcat/Java application logs, and authentication logs. Windows-specific conditions expand separately. Ascending/descending chronological or original order applies before pagination. An explicit source UTC offset enables queries on full-date logs without a timezone, preserving original evidence. Query settings are saved with the project; see [log queries](docs/PROJECTS.md#日志多维查询).
+
+Projects, evidence, findings, diagnostics, IOCs, AI history, and references support pagination and direct page jumps. Large projects reuse selections and page bookmarks, with full details loaded on demand. See [pagination and large projects](docs/PROJECTS.md#分页与大型项目).
+
 **Projects are saved manually.** Move an `.eair` file to another machine to continue viewing imported evidence and analysis records, without the original input files or a separate database service. Removing a project from the catalog retains its project file, evidence, and IOCs.
 
 ### Command-line CLI

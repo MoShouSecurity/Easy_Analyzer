@@ -23,6 +23,8 @@ mod compression;
 pub mod config;
 pub mod export;
 pub mod ioc;
+mod log_query;
+mod pagination;
 pub mod project;
 mod service;
 mod session;
@@ -30,6 +32,7 @@ mod storage;
 pub mod task;
 mod types;
 mod view;
+pub use log_query::{FieldMatch, LogFieldQuery, LogQuery, RecordOrder};
 
 pub use analyzer_core as core;
 pub use analyzer_core::{

@@ -28,6 +28,63 @@ fn append(session: &AnalysisSession, label: &str, text: &str) {
     .unwrap();
 }
 #[test]
+fn edited_metadata_survives_save_and_reopen_without_changing_evidence() {
+    let session = create();
+    append(&session, "metadata-test", "visit child.example.com\n");
+    let record = session.page(None, 0, 1).unwrap().items[0].id.clone();
+    ProjectService::note(&session, &record, "原有备注", &ctx()).unwrap();
+    IocService::add_value(&session, "example.com", None, "原有 IOC", &ctx()).unwrap();
+    IocService::scan(&session, true, &ctx()).unwrap();
+    let hits = IocService::matches(&session, 0, 100).unwrap().total;
+    let original = ProjectService::status(&session).unwrap().info;
+    let mut info = original.clone();
+    info.name = "编辑后的响应".into();
+    info.client = "编辑后的客户".into();
+    info.response_start = "2026-10-13T09:00:00+08:00".into();
+    info.response_end = Some("2026-10-14T18:00:00+08:00".into());
+    info.location = "合成现场".into();
+    info.responders = "合成服务人员".into();
+    info.description = "更新后的项目说明".into();
+    ProjectService::edit(&session, info.clone(), &ctx()).unwrap();
+    assert!(ProjectService::status(&session).unwrap().dirty);
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("edited.eair");
+    ProjectService::save(&session, &path, Path::new("config"), false, &ctx()).unwrap();
+    let reopened = ProjectService::open(&path, &ctx()).unwrap();
+    let status = ProjectService::status(&reopened).unwrap();
+    assert!(!status.dirty);
+    let saved = status.info;
+    assert_eq!(saved.id, original.id);
+    assert_eq!(saved.created_at, original.created_at);
+    assert_eq!(saved.name, info.name);
+    assert_eq!(saved.client, info.client);
+    assert_eq!(saved.response_start, info.response_start);
+    assert_eq!(saved.response_end, info.response_end);
+    assert_eq!(saved.location, info.location);
+    assert_eq!(saved.responders, info.responders);
+    assert_eq!(saved.description, info.description);
+    assert_eq!(reopened.page(None, 0, 100).unwrap().total, 1);
+    assert_eq!(reopened.page(None, 0, 1).unwrap().items[0].id, record);
+    assert_eq!(
+        ProjectService::read_note(&reopened, &record)
+            .unwrap()
+            .as_deref(),
+        Some("原有备注")
+    );
+    assert_eq!(IocService::matches(&reopened, 0, 100).unwrap().total, hits);
+    let catalog = ProjectCatalog::open(&dir.path().join("catalog")).unwrap();
+    catalog.register(&reopened).unwrap();
+    let entries = catalog
+        .list(&ProjectSearch {
+            text: "编辑后的客户".into(),
+            ..Default::default()
+        })
+        .unwrap();
+    assert_eq!(entries.len(), 1);
+    assert_eq!(entries[0].info.name, info.name);
+}
+
+#[test]
 fn identity_time_validation_and_catalog_relocation() {
     let a = create();
     let b = create();

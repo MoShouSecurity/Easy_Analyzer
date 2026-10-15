@@ -9,6 +9,7 @@ import type {
   IocView,
   SessionScreen,
   Filters,
+  Finding,
   ViewRequest,
   ViewResponse,
   DetailResponse,
@@ -28,6 +29,17 @@ export const api = {
     from: string | null;
     until: string | null;
   }) => invoke<ProjectEntry[]>("project_list", { search }),
+  projectsPage: (
+    search: {
+      text: string;
+      client: string;
+      from: string | null;
+      until: string | null;
+    },
+    offset: number,
+    limit: number,
+  ) =>
+    invoke<Page<ProjectEntry>>("project_list_page", { search, offset, limit }),
   removeProject: (id: string, path: string) =>
     invoke<void>("project_remove", { id, path }),
   createProject: (info: ProjectInfo) =>
@@ -58,6 +70,8 @@ export const api = {
   elevate: () =>
     invoke<"launched" | "cancelled" | "already_elevated">("request_elevation"),
   view: (request: ViewRequest) => invoke<ViewResponse>("get_view", { request }),
+  finding: (sessionId: number, id: string) =>
+    invoke<Finding>("get_finding", { sessionId, id }),
   detail: (sessionId: number, id: string) =>
     invoke<DetailResponse>("get_detail", { sessionId, id }),
   batches: (sessionId: number, run: number, offset: number) =>

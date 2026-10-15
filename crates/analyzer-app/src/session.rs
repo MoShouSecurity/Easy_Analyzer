@@ -58,6 +58,14 @@ impl RecordSelection {
     pub fn is_empty(&self) -> bool {
         self.len() == 0
     }
+    pub fn same_selection(&self, other: &Self) -> bool {
+        self.session_id == other.session_id
+            && match (&self.stored, &other.stored) {
+                (Some(a), Some(b)) => Arc::ptr_eq(a, b),
+                (None, None) => self.ids == other.ids,
+                _ => false,
+            }
+    }
 }
 
 #[derive(Debug, Clone, serde::Serialize)]
@@ -173,6 +181,10 @@ impl AnalysisSession {
                     count: n,
                     ids: Default::default(),
                     lazy: None,
+                    order: crate::RecordOrder::default(),
+                    pager: std::sync::Mutex::default(),
+                    process_rows: std::sync::Mutex::default(),
+                    flow_index: std::sync::Mutex::default(),
                     materialized: Default::default(),
                 })),
             });

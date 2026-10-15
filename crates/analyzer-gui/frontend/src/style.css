@@ -146,6 +146,7 @@ small {
   width: 100%;
   height: 100%;
   display: grid;
+  grid-template-columns: minmax(0, 1fr);
   grid-template-rows: 56px minmax(0, 1fr) 28px;
   background: var(--bg);
 }
@@ -658,13 +659,14 @@ small {
   text-overflow: ellipsis;
 }
 .select-content {
-  z-index: 80;
+  /* Portaled menus must sit above dialogs (91) and below tooltips (100). */
+  z-index: 95;
   background: var(--surface);
   border: 1px solid var(--line-strong);
   border-radius: 7px;
   padding: 4px;
   min-width: var(--radix-select-trigger-width);
-  max-height: 320px;
+  max-height: min(320px, var(--radix-select-content-available-height));
   box-shadow: var(--shadow);
   font-size: 13px;
   max-width: 340px;
@@ -2024,6 +2026,8 @@ small {
   border-radius: 11px;
   box-shadow: 0 25px 80px #0003;
   width: min(480px, calc(100vw - 48px));
+  max-height: calc(100vh - 48px);
+  overflow-y: auto;
   padding: 22px;
   outline: none;
 }
@@ -2284,10 +2288,6 @@ small {
   flex: 1;
   min-width: 0;
 }
-.ai-filter-dialog {
-  max-height: calc(100vh - 48px);
-  overflow-y: auto;
-}
 .ai-filter-dialog fieldset {
   border: 0;
   padding: 0;
@@ -2413,7 +2413,8 @@ small {
   min-width: 0;
 }
 .project-start,
-.project-browser {
+.project-browser,
+.project-current {
   display: flex;
   flex-direction: column;
   gap: 16px;
@@ -2421,6 +2422,101 @@ small {
   border: 1px solid var(--line);
   border-radius: var(--radius);
   background: var(--surface);
+}
+.project-current-heading {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  gap: 12px;
+}
+.project-current-heading h3 {
+  font-size: 15px;
+}
+.project-current-heading p {
+  margin: 6px 0 0;
+  color: var(--muted);
+  font-size: 12px;
+}
+.project-current-heading .btn {
+  flex-shrink: 0;
+}
+.project-current-fields {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 14px 24px;
+  margin: 0;
+}
+.project-current-fields > div:last-child {
+  grid-column: 1 / -1;
+}
+.project-current-fields dt {
+  margin-bottom: 5px;
+  font-size: 12px;
+  color: var(--muted);
+}
+.project-current-fields dd {
+  margin: 0;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+}
+.project-editor-dialog {
+  width: min(640px, calc(100vw - 48px));
+}
+.log-query-dialog {
+  width: min(760px, calc(100vw - 48px));
+  display: flex;
+  flex-direction: column;
+  overflow: hidden;
+}
+.log-query-dialog > form {
+  display: flex;
+  flex-direction: column;
+  min-height: 0;
+}
+.log-query-body {
+  min-height: 0;
+  overflow-y: auto;
+  padding-right: 6px;
+}
+.log-query-dialog .dialog-heading,
+.log-query-dialog .dialog-actions,
+.log-query-dialog .warning-note {
+  flex-shrink: 0;
+}
+.log-query-grid {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 0 18px;
+}
+.log-query-grid .input,
+.log-query-grid .select-trigger {
+  width: 100%;
+  max-width: none;
+}
+.log-query-hint {
+  margin: 10px 0;
+  color: var(--muted);
+  font-size: 12px;
+  line-height: 1.8;
+}
+.log-query-custom-heading {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  margin-top: 16px;
+}
+.log-query-custom-row {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) 88px minmax(0, 1fr) 32px;
+  align-items: center;
+  gap: 8px;
+  margin-top: 8px;
+}
+.ai-log-query {
+  margin-top: 16px;
+}
+.ai-log-query summary {
+  cursor: pointer;
 }
 .project-start h3,
 .project-list-heading h3 {
@@ -2565,4 +2661,64 @@ small {
   display: flex;
   flex-direction: column;
   gap: 14px;
+}
+
+.log-query-windows {
+  margin: 12px 0;
+}
+.log-query-windows summary {
+  cursor: pointer;
+  color: var(--muted);
+  font-size: 12px;
+  margin-bottom: 10px;
+}
+
+.pagination {
+  flex-shrink: 0;
+  flex-wrap: wrap;
+  height: auto;
+  gap: 5px;
+  padding: 6px 10px;
+}
+.pagination > div {
+  flex-wrap: wrap;
+}
+.page-jump {
+  display: flex;
+  align-items: center;
+  gap: 2px;
+}
+.page-jump input {
+  width: 62px;
+  height: 26px;
+  border: 1px solid var(--line);
+  border-radius: 4px;
+  background: var(--surface);
+  color: var(--text);
+  padding: 2px 4px;
+}
+.pagination .page-jump .btn {
+  width: auto;
+  padding: 0 5px;
+}
+
+.project-browser > .pagination {
+  position: sticky;
+  bottom: 0;
+  z-index: 1;
+  background: var(--surface);
+  margin: 0 -20px -20px;
+  padding: 8px 10px;
+}
+.project-page .page-jump input,
+.ioc-page .page-jump input {
+  width: 62px;
+  height: 26px;
+  padding: 2px 4px;
+}
+
+.ioc-table-scroll {
+  max-height: 320px;
+  overflow: auto;
+  min-width: 0;
 }

@@ -22,6 +22,8 @@ pub struct RecordFilter {
     pub category: Option<String>,
     pub status: Option<ParseStatus>,
     pub protocol: Option<String>,
+    pub log_query: crate::LogQuery,
+    pub order: crate::RecordOrder,
 }
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum FindingOrigin {
@@ -104,6 +106,7 @@ impl AnalysisSession {
         filter: &RecordFilter,
         ctx: &ExecutionContext,
     ) -> Result<RecordSelection> {
+        let log_query = filter.log_query.prepare()?;
         if let Some(db) = &self.0.store {
             ctx.check()?;
             let version = {
@@ -179,7 +182,45 @@ impl AnalysisSession {
                 {
                     continue;
                 }
+                if !log_query.matches(record) {
+                    continue;
+                }
                 ids.push(id.clone());
+            }
+            match filter.order {
+                crate::RecordOrder::OriginalAsc => {}
+                crate::RecordOrder::OriginalDesc => ids.reverse(),
+                order => {
+                    let mut sorted = ids
+                        .into_iter()
+                        .enumerate()
+                        .map(|(i, id)| {
+                            ctx.tick(Stage::Query, None, i, Some(selection.len()))?;
+                            let record = &r.records[self.0.index[&id]];
+                            Ok((log_query.time(record), self.0.index[&id], id))
+                        })
+                        .collect::<Result<Vec<_>>>()?;
+                    sorted.sort_by(|(a, ai, _), (b, bi, _)| match (a, b) {
+                        (Some(a), Some(b)) => {
+                            if order == crate::RecordOrder::TimeAsc {
+                                a.cmp(b).then(ai.cmp(bi))
+                            } else {
+                                b.cmp(a).then(bi.cmp(ai))
+                            }
+                        }
+                        (Some(_), None) => std::cmp::Ordering::Less,
+                        (None, Some(_)) => std::cmp::Ordering::Greater,
+                        _ => {
+                            if order == crate::RecordOrder::TimeAsc {
+                                ai.cmp(bi)
+                            } else {
+                                bi.cmp(ai)
+                            }
+                        }
+                    });
+                    ctx.check()?;
+                    ids = sorted.into_iter().map(|(_, _, id)| id).collect();
+                }
             }
             self.select_ids(ids)
         })?
@@ -520,7 +561,92 @@ impl AnalysisSession {
         selection: &RecordSelection,
         ctx: &ExecutionContext,
     ) -> Result<Vec<ProcessRow>> {
+        Ok(self.cached_process_rows(selection, ctx)?.as_ref().clone())
+    }
+    pub fn process_row_page(
+        &self,
+        selection: &RecordSelection,
+        offset: usize,
+        limit: usize,
+        collapsed: &HashSet<String>,
+        focus: Option<&str>,
+        ctx: &ExecutionContext,
+    ) -> Result<Page<ProcessRow>> {
+        crate::storage::page_limit(limit)?;
+        let all = self.cached_process_rows(selection, ctx)?;
+        if collapsed.is_empty() || focus.is_some() {
+            let offset = focus
+                .and_then(|id| all.iter().position(|row| row.record_id == id))
+                .map_or(offset, |index| index / limit * limit);
+            return page_slice(&all, offset, limit);
+        }
+        let mut hidden = None;
+        let mut rows = Vec::new();
+        for (i, row) in all.iter().enumerate() {
+            ctx.tick(Stage::Query, None, i, Some(all.len()))?;
+            if hidden.is_some_and(|depth| row.depth > depth) {
+                continue;
+            }
+            hidden = None;
+            if focus.is_none() && collapsed.contains(&row.record_id) {
+                hidden = Some(row.depth);
+            }
+            rows.push(row);
+        }
+        let offset = focus
+            .and_then(|id| rows.iter().position(|row| row.record_id == id))
+            .map_or(offset, |index| index / limit * limit);
+        Ok(Page {
+            offset,
+            total: rows.len(),
+            items: rows.into_iter().skip(offset).take(limit).cloned().collect(),
+        })
+    }
+    pub fn process_list_rows(
+        &self,
+        selection: &RecordSelection,
+        ids: &[String],
+        ctx: &ExecutionContext,
+    ) -> Result<Vec<ProcessRow>> {
+        let rows = self.cached_process_rows(selection, ctx)?;
+        let ids = ids.iter().collect::<HashSet<_>>();
+        let mut out = Vec::new();
+        for (i, row) in rows.iter().enumerate() {
+            ctx.tick(Stage::Query, None, i, Some(rows.len()))?;
+            if ids.contains(&row.record_id) {
+                let mut row = row.clone();
+                row.depth = 0;
+                row.has_children = false;
+                row.context = false;
+                out.push(row);
+            }
+        }
+        Ok(out)
+    }
+    fn cached_process_rows(
+        &self,
+        selection: &RecordSelection,
+        ctx: &ExecutionContext,
+    ) -> Result<std::sync::Arc<Vec<ProcessRow>>> {
         self.validate_selection(selection)?;
+        ctx.check()?;
+        let version = if let Some(db) = &self.0.store {
+            crate::project::content_revision(&*db.lock()?)?
+        } else {
+            0
+        };
+        let stored = selection.stored.as_ref();
+        if let Some(stored) = stored {
+            let cache = stored
+                .process_rows
+                .lock()
+                .map_err(|_| anyhow::anyhow!("进程分页缓存不可用"))?;
+            if let Some((old, rows)) = &*cache
+                && *old == version
+            {
+                return Ok(rows.clone());
+            }
+        }
         let forest = if let Some(db) = &self.0.store {
             db.process_forest(ctx)?
         } else {
@@ -556,13 +682,14 @@ impl AnalysisSession {
                 .iter()
                 .map(|n| (&n.record_id, n))
                 .collect::<BTreeMap<_, _>>();
-            let mut visible = selected.clone();
+            let mut visible = HashSet::new();
             let mut expanded = HashSet::new();
             for (i, node) in tree.nodes.iter().enumerate() {
                 ctx.tick(Stage::Query, None, i, Some(tree.nodes.len()))?;
                 if !selected.contains(&node.record_id) {
                     continue;
                 }
+                visible.insert(node.record_id.clone());
                 let mut parent = node.parent_id.as_ref();
                 let mut walked = HashSet::new();
                 while let Some(id) = parent {
@@ -600,6 +727,14 @@ impl AnalysisSession {
                 stack.extend(n.children.iter().rev().map(|c| (c, depth + 1)));
             }
         }
+        let rows = std::sync::Arc::new(rows);
+        if let Some(stored) = stored {
+            *stored
+                .process_rows
+                .lock()
+                .map_err(|_| anyhow::anyhow!("进程分页缓存不可用"))? =
+                Some((version, rows.clone()));
+        }
         Ok(rows)
     }
 }
@@ -610,6 +745,11 @@ pub struct FindingPreview {
     #[serde(flatten)]
     pub finding: Finding,
     pub evidence_count: usize,
+    #[serde(skip_serializing_if = "is_false")]
+    pub table_preview: bool,
+}
+fn is_false(value: &bool) -> bool {
+    !value
 }
 impl AnalysisSession {
     pub fn finding_references(
@@ -620,30 +760,7 @@ impl AnalysisSession {
     ) -> Result<Page<String>> {
         crate::storage::page_limit(limit)?;
         if let Some(db) = &self.0.store {
-            let c = db.lock()?;
-            if !c.query_row(
-                "SELECT EXISTS(SELECT 1 FROM findings WHERE id=?1)",
-                [id],
-                |r| r.get::<_, bool>(0),
-            )? {
-                bail!("发现不属于当前项目");
-            }
-            let total = c.query_row(
-                "SELECT COUNT(*) FROM finding_refs WHERE finding_id=?1",
-                [id],
-                |r| r.get::<_, i64>(0),
-            )? as usize;
-            let mut s=c.prepare("SELECT record_id FROM finding_refs WHERE finding_id=?1 ORDER BY ordinal LIMIT ?2 OFFSET ?3")?;
-            let items = s
-                .query_map(rusqlite::params![id, limit as i64, offset as i64], |r| {
-                    r.get(0)
-                })?
-                .collect::<rusqlite::Result<_>>()?;
-            Ok(Page {
-                offset,
-                total,
-                items,
-            })
+            db.reference_page(id, offset, limit)
         } else {
             self.with_report(|r| {
                 let f = r
@@ -665,6 +782,33 @@ impl AnalysisSession {
             })?
         }
     }
+    pub fn finding_table_page(
+        &self,
+        filter: &FindingFilter,
+        offset: usize,
+        limit: usize,
+        ctx: &ExecutionContext,
+    ) -> Result<Page<FindingPreview>> {
+        self.finding_previews_inner(filter, offset, limit, ctx, true)
+    }
+    pub fn finding_preview(&self, id: &str) -> Result<FindingPreview> {
+        let mut finding = if let Some(db) = &self.0.store {
+            let c = db.lock()?;
+            crate::storage::values::<Finding>(&c, "SELECT json FROM findings WHERE id=?1", [id])?
+                .into_iter()
+                .next()
+        } else {
+            self.with_report(|r| r.findings.iter().find(|f| f.id == id).cloned())?
+        }
+        .ok_or_else(|| anyhow::anyhow!("发现不存在"))?;
+        let refs = self.finding_references(id, 0, 100)?;
+        finding.evidence_ids = refs.items;
+        Ok(FindingPreview {
+            finding,
+            evidence_count: refs.total,
+            table_preview: false,
+        })
+    }
     pub fn finding_previews(
         &self,
         filter: &FindingFilter,
@@ -672,44 +816,46 @@ impl AnalysisSession {
         limit: usize,
         ctx: &ExecutionContext,
     ) -> Result<Page<FindingPreview>> {
+        self.finding_previews_inner(filter, offset, limit, ctx, false)
+    }
+    fn finding_previews_inner(
+        &self,
+        filter: &FindingFilter,
+        offset: usize,
+        limit: usize,
+        ctx: &ExecutionContext,
+        table: bool,
+    ) -> Result<Page<FindingPreview>> {
         crate::storage::page_limit(limit)?;
         ctx.check()?;
         if let Some(db) = &self.0.store {
-            let c = db.lock()?;
-            let mut where_sql = String::from("1=1");
-            let mut p = vec![];
-            if let Some(severity) = &filter.severity {
-                where_sql.push_str(" AND severity=?");
-                p.push(rusqlite::types::Value::Integer(severity.rank() as i64));
-            }
-            match filter.origin {
-                FindingOrigin::Local => where_sql.push_str(" AND origin LIKE 'local:%'"),
-                FindingOrigin::Ai => where_sql.push_str(" AND origin LIKE 'ai:%'"),
-                _ => {}
-            }
-            let total = c.query_row(
-                &format!("SELECT COUNT(*) FROM findings WHERE {where_sql}"),
-                rusqlite::params_from_iter(&p),
-                |r| r.get::<_, i64>(0),
-            )? as usize;
-            p.push((limit as i64).into());
-            p.push((offset as i64).into());
-            let headers: Vec<Finding> = crate::storage::values(
-                &c,
-                &format!(
-                    "SELECT json FROM findings WHERE {where_sql} ORDER BY severity DESC,ordinal LIMIT ? OFFSET ?"
-                ),
-                rusqlite::params_from_iter(p),
-            )?;
-            drop(c);
+            let page = db.finding_headers(filter, offset, limit, ctx)?;
+            let total = page.total;
+            let headers = page.items;
             let mut items = vec![];
             for mut finding in headers {
                 ctx.check()?;
-                let refs = self.finding_references(&finding.id, 0, 100)?;
-                finding.evidence_ids = refs.items;
+                let count = if table {
+                    let c = db.lock()?;
+                    db.cached_count(
+                        &c,
+                        "SELECT COUNT(*) FROM finding_refs WHERE finding_id=?1",
+                        &[finding.id.clone().into()],
+                    )?
+                } else {
+                    let refs = self.finding_references(&finding.id, 0, 100)?;
+                    finding.evidence_ids = refs.items;
+                    refs.total
+                };
+                if table {
+                    finding.evidence_ids.clear();
+                    finding.description.clear();
+                    finding.recommendations.clear();
+                }
                 items.push(FindingPreview {
                     finding,
-                    evidence_count: refs.total,
+                    evidence_count: count,
+                    table_preview: table,
                 });
             }
             Ok(Page {
@@ -728,9 +874,15 @@ impl AnalysisSession {
                     .map(|mut finding| {
                         let count = finding.evidence_ids.len();
                         finding.evidence_ids.truncate(100);
+                        if table {
+                            finding.evidence_ids.clear();
+                            finding.description.clear();
+                            finding.recommendations.clear();
+                        }
                         FindingPreview {
                             finding,
                             evidence_count: count,
+                            table_preview: table,
                         }
                     })
                     .collect(),
@@ -754,6 +906,7 @@ impl AnalysisSession {
                 items.push(FindingPreview {
                     finding,
                     evidence_count: refs.total,
+                    table_preview: false,
                 });
             }
             Ok(items)
@@ -767,6 +920,7 @@ impl AnalysisSession {
                     FindingPreview {
                         finding,
                         evidence_count: count,
+                        table_preview: false,
                     }
                 })
                 .collect())

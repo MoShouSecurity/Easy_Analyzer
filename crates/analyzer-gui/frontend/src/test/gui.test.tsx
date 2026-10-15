@@ -5,6 +5,7 @@ import {
   waitFor,
   cleanup,
   act,
+  within,
 } from "@testing-library/react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import userEvent from "@testing-library/user-event";
@@ -1133,14 +1134,140 @@ it("prevents closing a dirty project until the user resolves unsaved changes", a
   await waitFor(() => expect(mock.window.destroy).toHaveBeenCalledTimes(1));
 });
 
+it("edits all project details through explicit entries and restores them after saving", async () => {
+  const original = mock.invoke.getMockImplementation()!;
+  let fresh = dirtyProjectBoot();
+  fresh.project!.dirty = false;
+  const identity = {
+    id: fresh.project!.info.id,
+    created_at: fresh.project!.info.created_at,
+  };
+  let catalogInfo = structuredClone(fresh.project!.info);
+  const job = {
+    task_id: 300,
+    session_id: 7,
+    epoch: 0,
+    revision: 3,
+    kind: "project_save",
+    status: "running",
+    label: "保存项目",
+    stage: null,
+    completed: null,
+    total: null,
+    error: null,
+    saved_paths: [],
+  };
+  mock.invoke.mockImplementation(async (cmd, args) => {
+    if (cmd === "initialize") return structuredClone(fresh);
+    if (cmd === "project_list_page")
+      return {
+        offset: 0,
+        total: 1,
+        items: [
+          {
+            info: catalogInfo,
+            path: "/tmp/synthetic.eair",
+            last_opened: "2026-10-14T15:00:00+08:00",
+            missing: false,
+          },
+        ],
+      };
+    if (cmd === "project_filters") return structuredClone(fresh.project);
+    if (cmd === "project_edit") {
+      fresh = {
+        ...fresh,
+        project: {
+          ...fresh.project!,
+          info: args.info,
+          dirty: true,
+          revision: 3,
+        },
+      };
+      return structuredClone(fresh.project);
+    }
+    if (cmd === "project_save") return job;
+    return original(cmd, args);
+  });
+  const { unmount } = render(<App />);
+  await screen.findByRole("heading", { name: "当前项目资料" });
+  fireEvent.click(screen.getByRole("button", { name: "编辑资料" }));
+  await screen.findByRole("dialog", { name: "编辑项目资料" });
+  const values = [
+    ["项目名称", "更新后的响应"],
+    ["客户单位 *", "更新后的客户"],
+    ["响应开始时间（含时区） *", "2026-10-13T09:00:00+08:00"],
+    ["响应结束时间（含时区）", "2026-10-14T18:00:00+08:00"],
+    ["响应地点", "合成地点"],
+    ["服务人员", "合成服务人员"],
+    ["项目说明", "更新后的项目说明"],
+  ];
+  for (const [label, value] of values)
+    fireEvent.change(screen.getByLabelText(label), { target: { value } });
+  fireEvent.click(screen.getByRole("button", { name: "应用修改" }));
+  await waitFor(() =>
+    expect(screen.queryByRole("dialog")).not.toBeInTheDocument(),
+  );
+  expect(mock.invoke).toHaveBeenCalledWith("project_edit", {
+    sessionId: 7,
+    info: expect.objectContaining({
+      ...identity,
+      name: "更新后的响应",
+      client: "更新后的客户",
+      response_start: "2026-10-13T09:00:00+08:00",
+      response_end: "2026-10-14T18:00:00+08:00",
+      location: "合成地点",
+      responders: "合成服务人员",
+      description: "更新后的项目说明",
+    }),
+  });
+  const card = screen.getByRole("region", { name: "当前项目资料" });
+  expect(within(card).getByText("有未保存的修改")).toBeVisible();
+  for (const [, value] of values)
+    expect(within(card).getByText(value)).toBeVisible();
+  fireEvent.click(screen.getByRole("button", { name: "保存 *" }));
+  await waitFor(() =>
+    expect(mock.invoke).toHaveBeenCalledWith("project_save", {
+      sessionId: 7,
+      path: "/tmp/synthetic.eair",
+      overwrite: false,
+    }),
+  );
+  fresh.project!.dirty = false;
+  catalogInfo = structuredClone(fresh.project!.info);
+  const listener = mock.event.mock.calls.find(
+    ([name]) => name === "analysis-task",
+  )![1];
+  await act(async () =>
+    listener({
+      payload: {
+        ...job,
+        status: "completed",
+        saved_paths: ["/tmp/synthetic.eair"],
+      },
+    }),
+  );
+  await waitFor(() => expect(within(card).getByText("已保存")).toBeVisible());
+  await screen.findByRole("heading", { name: "更新后的响应" });
+  unmount();
+  render(<App />);
+  await screen.findByRole("heading", { name: "当前项目资料" });
+  fireEvent.click(screen.getByRole("button", { name: "编辑项目资料" }));
+  await screen.findByRole("dialog", { name: "编辑项目资料" });
+  for (const [label, value] of values)
+    expect(screen.getByLabelText(label)).toHaveValue(value);
+  expect(mock.invoke.mock.calls.some(([cmd]) => cmd === "project_create")).toBe(
+    false,
+  );
+});
+
 describe("response command navigation", () => {
   it("opens without a project and copies without loading evidence", async () => {
     const original = mock.invoke.getMockImplementation()!;
     mock.invoke.mockImplementation((command, args) =>
       command === "initialize"
         ? Promise.resolve({ ...boot, session_id: null, project: null })
-        : command === "project_list"
-          ? Promise.resolve([])
+        : command === "project_list_page"
+          ? Promise.resolve({ offset: 0, total: 0, items: [] })
           : original(command, args),
     );
     render(<App />);
@@ -1181,8 +1308,8 @@ describe("response command navigation", () => {
         ? Promise.resolve(structuredClone(fresh))
         : command === "project_filters"
           ? Promise.resolve(fresh.project)
-          : command === "project_list"
-            ? Promise.resolve([])
+          : command === "project_list_page"
+            ? Promise.resolve({ offset: 0, total: 0, items: [] })
             : original(command, args),
     );
     render(<App />);
@@ -1288,4 +1415,240 @@ describe("response command navigation", () => {
       ).toBeEnabled();
     },
   );
+});
+
+it("preserves combined log dimensions across order changes and pagination", async () => {
+  const user = userEvent.setup();
+  render(<App />);
+  await waitFor(() => expect(mock.window.onCloseRequested).toHaveBeenCalled());
+  fireEvent.click(screen.getByRole("button", { name: "日志证据" }));
+  await screen.findByText("中文证据记录");
+  fireEvent.click(screen.getByRole("button", { name: "多维查询" }));
+  fireEvent.change(screen.getByLabelText("Windows 事件 ID"), {
+    target: { value: "4624,4625" },
+  });
+  fireEvent.change(screen.getByLabelText("日志通道"), {
+    target: { value: "Security" },
+  });
+  fireEvent.click(screen.getByRole("button", { name: "应用查询" }));
+  await waitFor(() =>
+    expect(screen.queryByRole("dialog")).not.toBeInTheDocument(),
+  );
+  expect(mock.invoke).toHaveBeenCalledWith("get_view", {
+    request: expect.objectContaining({
+      screen: "logs",
+      commit_selection: true,
+      filters: expect.objectContaining({
+        offset: 0,
+        log_query: expect.objectContaining({
+          event_ids: "4624,4625",
+          channel: "Security",
+        }),
+      }),
+    }),
+  });
+  await user.click(screen.getByRole("combobox", { name: "日志排列顺序" }));
+  await user.click(screen.getByRole("option", { name: "时间倒序（新→旧）" }));
+  await waitFor(() =>
+    expect(mock.invoke).toHaveBeenCalledWith("get_view", {
+      request: expect.objectContaining({
+        filters: expect.objectContaining({ order: "time_desc", offset: 0 }),
+      }),
+    }),
+  );
+  await waitFor(() =>
+    expect(screen.getByRole("button", { name: "下一页" })).toBeEnabled(),
+  );
+  fireEvent.click(screen.getByRole("button", { name: "下一页" }));
+  await waitFor(() =>
+    expect(mock.invoke).toHaveBeenCalledWith("get_view", {
+      request: expect.objectContaining({
+        filters: expect.objectContaining({
+          order: "time_desc",
+          offset: 100,
+          log_query: expect.objectContaining({
+            event_ids: "4624,4625",
+            channel: "Security",
+          }),
+        }),
+      }),
+    }),
+  );
+  expect(mock.invoke.mock.calls.some(([c]) => c === "start_ai")).toBe(false);
+});
+
+it("restores legacy log filters with defaults for new query dimensions", async () => {
+  const original = mock.invoke.getMockImplementation()!;
+  mock.invoke.mockImplementation((command, args) =>
+    command === "initialize"
+      ? Promise.resolve({
+          ...boot,
+          filters: {
+            logs: {
+              text: "旧筛选",
+              regex: false,
+              suspicious: false,
+              source: null,
+              category: null,
+              status: null,
+              protocol: null,
+              offset: 0,
+              limit: 100,
+              tree: true,
+              packets: false,
+              flow: null,
+              collapsed: [],
+              severity: null,
+              origin: "all",
+            },
+          },
+        })
+      : original(command, args),
+  );
+  render(<App />);
+  await waitFor(() => expect(mock.window.onCloseRequested).toHaveBeenCalled());
+  fireEvent.click(screen.getByRole("button", { name: "日志证据" }));
+  await screen.findByText("中文证据记录");
+  expect(screen.getByLabelText("查询证据")).toHaveValue("旧筛选");
+  expect(
+    screen.getByRole("combobox", { name: "日志排列顺序" }),
+  ).toHaveTextContent("原始正序");
+  fireEvent.click(screen.getByRole("button", { name: "多维查询" }));
+  expect(screen.getByLabelText("Windows 事件 ID")).toHaveValue("");
+});
+
+it("cancels a pending multidimensional query and ignores its late result", async () => {
+  const original = mock.invoke.getMockImplementation()!;
+  let complete!: () => void;
+  mock.invoke.mockImplementation((command, args) => {
+    if (
+      command === "get_view" &&
+      args.request.filters.log_query.event_ids === "4624"
+    )
+      return new Promise((resolve) => {
+        complete = () => resolve(response(args.request));
+      });
+    return original(command, args);
+  });
+  render(<App />);
+  await waitFor(() => expect(mock.window.onCloseRequested).toHaveBeenCalled());
+  fireEvent.click(screen.getByRole("button", { name: "日志证据" }));
+  await screen.findByText("中文证据记录");
+  fireEvent.click(screen.getByRole("button", { name: "多维查询" }));
+  fireEvent.change(screen.getByLabelText("Windows 事件 ID"), {
+    target: { value: "4624" },
+  });
+  fireEvent.click(screen.getByRole("button", { name: "应用查询" }));
+  fireEvent.click(await screen.findByRole("button", { name: "取消查询" }));
+  await waitFor(() =>
+    expect(screen.queryByRole("dialog")).not.toBeInTheDocument(),
+  );
+  await act(async () => complete());
+  expect(screen.getByRole("button", { name: "多维查询" })).toBeVisible();
+  expect(screen.getByText("中文证据记录")).toBeVisible();
+  const requests = mock.invoke.mock.calls.filter(
+    ([command]) => command === "get_view",
+  );
+  expect(requests.at(-1)![1].request.filters.log_query.event_ids).toBe("");
+});
+
+it("loads finding details on demand and ignores replies for a previous selection", async () => {
+  const make = (id: string) => ({
+    id,
+    origin: "local:synthetic",
+    severity: "low" as const,
+    title: `合成发现 ${id}`,
+    description: "",
+    evidence_ids: [] as string[],
+    confidence: 0.5,
+    recommendations: [],
+    table_preview: true,
+    evidence_count: 150,
+  });
+  const a = make("A"),
+    b = make("B");
+  const pending: Record<string, (value: any) => void> = {};
+  const original = mock.invoke.getMockImplementation()!;
+  mock.invoke.mockImplementation((command, args) => {
+    if (command === "get_view")
+      return {
+        ...response(args.request),
+        findings: { items: [a, b], total: 2, offset: 0 },
+      };
+    if (command === "get_finding")
+      return new Promise((resolve) => {
+        pending[args.id] = resolve;
+      });
+    return original(command, args);
+  });
+  render(<App />);
+  await waitFor(() => expect(mock.window.onCloseRequested).toHaveBeenCalled());
+  fireEvent.click(screen.getByRole("button", { name: "分析概览" }));
+  fireEvent.click(await screen.findByText("合成发现 A"));
+  await waitFor(() =>
+    expect(mock.invoke).toHaveBeenCalledWith("get_finding", {
+      sessionId: 7,
+      id: "A",
+    }),
+  );
+  fireEvent.click(screen.getByText("合成发现 B"));
+  await waitFor(() =>
+    expect(mock.invoke).toHaveBeenCalledWith("get_finding", {
+      sessionId: 7,
+      id: "B",
+    }),
+  );
+  await act(async () =>
+    pending.B({
+      ...b,
+      table_preview: false,
+      description: "完整说明乙",
+      evidence_ids: ["evidence-b"],
+    }),
+  );
+  await screen.findByText("完整说明乙");
+  expect(
+    await screen.findByRole("button", { name: "evidence-b" }),
+  ).toBeVisible();
+  await act(async () =>
+    pending.A({
+      ...a,
+      table_preview: false,
+      description: "过期说明甲",
+      evidence_ids: ["evidence-a"],
+    }),
+  );
+  expect(screen.queryByText("过期说明甲")).not.toBeInTheDocument();
+  expect(screen.getByRole("button", { name: "evidence-b" })).toBeVisible();
+});
+
+it("keeps parsed log summaries visible when list fields are compacted", async () => {
+  const original = mock.invoke.getMockImplementation()!;
+  mock.invoke.mockImplementation((command, args) => {
+    if (command === "get_view")
+      return {
+        ...response(args.request),
+        records: {
+          offset: 0,
+          total: 1,
+          items: [
+            {
+              ...record,
+              data: {
+                kind: "log",
+                fields: { category: "auth_text", fields: {} },
+              },
+              summary: "账号=合成用户 · 来源=192.0.2.10",
+            },
+          ],
+        },
+      };
+    return original(command, args);
+  });
+  render(<App />);
+  await waitFor(() => expect(mock.window.onCloseRequested).toHaveBeenCalled());
+  fireEvent.click(screen.getByRole("button", { name: "日志证据" }));
+  expect(
+    await screen.findByText("账号=合成用户 · 来源=192.0.2.10"),
+  ).toBeVisible();
 });

@@ -1,18 +1,12 @@
+import { useEffect, useRef } from "react";
 import {
   flexRender,
   getCoreRowModel,
   useReactTable,
   type ColumnDef,
 } from "@tanstack/react-table";
-import {
-  ChevronLeft,
-  ChevronRight,
-  Database,
-  LoaderCircle,
-} from "lucide-react";
-import { Button } from "./ui/button";
-import { Select } from "./ui/select";
-import { number } from "../lib/utils";
+import { Database, LoaderCircle } from "lucide-react";
+import { Pagination } from "./Pagination";
 import type { Page } from "../types";
 export function DataTable<T>({
   page,
@@ -37,6 +31,10 @@ export function DataTable<T>({
   onSize?: (limit: number) => void;
   limit?: number;
 }) {
+  const scroller = useRef<HTMLDivElement>(null);
+  useEffect(() => {
+    if (scroller.current) scroller.current.scrollTop = 0;
+  }, [page?.offset, limit]);
   const table = useReactTable({
     data: page?.items || [],
     columns,
@@ -47,7 +45,7 @@ export function DataTable<T>({
   });
   return (
     <div className="data-table">
-      <div className="table-scroll">
+      <div className="table-scroll" ref={scroller}>
         <table>
           <colgroup>
             {table.getAllLeafColumns().map((c) => (
@@ -102,42 +100,14 @@ export function DataTable<T>({
         )}
       </div>
       {onPage && (
-        <div className="pagination">
-          <span>
-            {page
-              ? `${number(page.total)} 条 · 第 ${Math.floor(page.offset / limit) + 1} / ${Math.max(1, Math.ceil(page.total / limit))} 页`
-              : "尚无结果"}
-          </span>
-          <div>
-            <Select
-              label="每页记录数"
-              value={String(limit)}
-              onChange={(v) => onSize?.(Number(v))}
-              options={[50, 100, 200].map((v) => ({
-                value: String(v),
-                label: `${v} / 页`,
-              }))}
-            />
-            <Button
-              variant="ghost"
-              size="icon"
-              aria-label="上一页"
-              disabled={loading || !page || page.offset === 0}
-              onClick={() => onPage(Math.max(0, (page?.offset || 0) - limit))}
-            >
-              <ChevronLeft size={15} />
-            </Button>
-            <Button
-              variant="ghost"
-              size="icon"
-              aria-label="下一页"
-              disabled={loading || !page || page.offset + limit >= page.total}
-              onClick={() => onPage((page?.offset || 0) + limit)}
-            >
-              <ChevronRight size={15} />
-            </Button>
-          </div>
-        </div>
+        <Pagination
+          offset={page?.offset || 0}
+          total={page?.total || 0}
+          limit={limit}
+          loading={loading || !page}
+          onPage={onPage}
+          onSize={onSize}
+        />
       )}
     </div>
   );
