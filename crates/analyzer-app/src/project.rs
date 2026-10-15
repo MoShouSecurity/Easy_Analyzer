@@ -643,6 +643,16 @@ impl ProjectCatalog {
         fs::create_dir_all(root)?;
         let c = Connection::open(root.join("projects.sqlite"))?;
         c.execute_batch("CREATE TABLE IF NOT EXISTS projects(id TEXT PRIMARY KEY,path TEXT NOT NULL,json TEXT NOT NULL,last_opened TEXT NOT NULL);")?;
+        c.execute_batch(
+            "CREATE INDEX IF NOT EXISTS project_catalog_order ON projects(last_opened DESC,id);",
+        )?;
+        c.create_scalar_function(
+            "catalog_lower",
+            1,
+            rusqlite::functions::FunctionFlags::SQLITE_UTF8
+                | rusqlite::functions::FunctionFlags::SQLITE_DETERMINISTIC,
+            |ctx| Ok(ctx.get::<String>(0)?.to_lowercase()),
+        )?;
         Ok(Self {
             connection: std::sync::Mutex::new(c),
         })
@@ -674,6 +684,64 @@ impl ProjectCatalog {
             bail!("项目列表已更新，请刷新后重试");
         }
         Ok(())
+    }
+    pub fn list_page(
+        &self,
+        search: &ProjectSearch,
+        offset: usize,
+        limit: usize,
+    ) -> Result<crate::Page<ProjectEntry>> {
+        crate::storage::page_limit(limit)?;
+        let from = search
+            .from
+            .as_deref()
+            .map(|s| chrono::NaiveDate::parse_from_str(s, "%Y-%m-%d"))
+            .transpose()?;
+        let until = search
+            .until
+            .as_deref()
+            .map(|s| chrono::NaiveDate::parse_from_str(s, "%Y-%m-%d"))
+            .transpose()?;
+        if from.zip(until).is_some_and(|(a, b)| a > b) {
+            bail!("开始日期不得晚于结束日期");
+        }
+        let c = self
+            .connection
+            .lock()
+            .map_err(|_| anyhow!("项目目录不可用"))?;
+        let condition = "(instr(catalog_lower(json_extract(json,'$.name')),?1)>0 OR instr(catalog_lower(json_extract(json,'$.client')),?1)>0) AND instr(catalog_lower(json_extract(json,'$.client')),?2)>0 AND (?3 IS NULL OR substr(json_extract(json,'$.response_start'),1,10)>=?3) AND (?4 IS NULL OR substr(json_extract(json,'$.response_start'),1,10)<=?4)";
+        let text = search.text.to_lowercase();
+        let client = search.client.to_lowercase();
+        let total = c.query_row(
+            &format!("SELECT COUNT(*) FROM projects WHERE {condition}"),
+            params![text, client, search.from, search.until],
+            |r| r.get::<_, i64>(0),
+        )? as usize;
+        let offset = offset.min(total.saturating_sub(1) / limit * limit);
+        let mut stmt=c.prepare(&format!("SELECT path,json,last_opened FROM projects WHERE {condition} ORDER BY last_opened DESC,id LIMIT ?5 OFFSET ?6"))?;
+        let mut rows = stmt.query(params![
+            text,
+            client,
+            search.from,
+            search.until,
+            limit as i64,
+            offset as i64
+        ])?;
+        let mut items = vec![];
+        while let Some(row) = rows.next()? {
+            let path: String = row.get(0)?;
+            items.push(ProjectEntry {
+                missing: !Path::new(&path).is_file(),
+                path,
+                info: crate::storage::decode(row.get(1)?)?,
+                last_opened: row.get(2)?,
+            });
+        }
+        Ok(crate::Page {
+            offset,
+            total,
+            items,
+        })
     }
     pub fn list(&self, search: &ProjectSearch) -> Result<Vec<ProjectEntry>> {
         let from = search
@@ -729,5 +797,62 @@ impl ProjectCatalog {
             });
         }
         Ok(out)
+    }
+}
+
+#[cfg(test)]
+mod pagination_tests {
+    use super::*;
+    #[test]
+    fn paged_catalog_preserves_order_unicode_filters_missing_files_and_removal() {
+        let dir = tempfile::tempdir().unwrap();
+        let catalog = ProjectCatalog::open(dir.path()).unwrap();
+        for i in 0..125 {
+            let info = ProjectInfo::new(format!("合成项目{i:03}"), "ÖCLIENT 单位");
+            let c = catalog.connection.lock().unwrap();
+            c.execute(
+                "INSERT INTO projects VALUES(?1,?2,?3,?4)",
+                params![
+                    info.id,
+                    format!("/missing/synthetic-{i}.eair"),
+                    json(&info).unwrap(),
+                    format!("2026-10-14-{i:03}")
+                ],
+            )
+            .unwrap();
+        }
+        let search = ProjectSearch {
+            client: "öclient".into(),
+            ..Default::default()
+        };
+        let all = catalog.list(&search).unwrap();
+        let first = catalog.list_page(&search, 0, 50).unwrap();
+        let last = catalog.list_page(&search, 100, 50).unwrap();
+        assert_eq!(first.total, 125);
+        assert_eq!(first.items.len(), 50);
+        assert_eq!(last.items.len(), 25);
+        assert_eq!(first.items[0].info.id, all[0].info.id);
+        assert_eq!(last.items[0].info.id, all[100].info.id);
+        assert!(first.items.iter().all(|entry| entry.missing));
+        assert_eq!(catalog.list_page(&search, 999, 50).unwrap().offset, 100);
+        for entry in last.items {
+            catalog.remove(&entry.info.id, &entry.path).unwrap();
+        }
+        let page = catalog.list_page(&search, 100, 50).unwrap();
+        assert_eq!(page.total, 100);
+        assert_eq!(page.offset, 50);
+        assert!(
+            catalog
+                .list_page(
+                    &ProjectSearch {
+                        from: Some("2026-10-15".into()),
+                        until: Some("2026-10-14".into()),
+                        ..Default::default()
+                    },
+                    0,
+                    50
+                )
+                .is_err()
+        );
     }
 }

@@ -211,6 +211,7 @@ export interface RecordSummary {
 export type EvidenceRecord = RecordSummary & { raw: string };
 export interface Finding {
   evidence_count?: number;
+  table_preview?: boolean;
   id: string;
   origin: string;
   severity: Severity;

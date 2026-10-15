@@ -1159,15 +1159,19 @@ it("edits all project details through explicit entries and restores them after s
   };
   mock.invoke.mockImplementation(async (cmd, args) => {
     if (cmd === "initialize") return structuredClone(fresh);
-    if (cmd === "project_list")
-      return [
-        {
-          info: catalogInfo,
-          path: "/tmp/synthetic.eair",
-          last_opened: "2026-10-14T15:00:00+08:00",
-          missing: false,
-        },
-      ];
+    if (cmd === "project_list_page")
+      return {
+        offset: 0,
+        total: 1,
+        items: [
+          {
+            info: catalogInfo,
+            path: "/tmp/synthetic.eair",
+            last_opened: "2026-10-14T15:00:00+08:00",
+            missing: false,
+          },
+        ],
+      };
     if (cmd === "project_filters") return structuredClone(fresh.project);
     if (cmd === "project_edit") {
       fresh = {
@@ -1262,8 +1266,8 @@ describe("response command navigation", () => {
     mock.invoke.mockImplementation((command, args) =>
       command === "initialize"
         ? Promise.resolve({ ...boot, session_id: null, project: null })
-        : command === "project_list"
-          ? Promise.resolve([])
+        : command === "project_list_page"
+          ? Promise.resolve({ offset: 0, total: 0, items: [] })
           : original(command, args),
     );
     render(<App />);
@@ -1304,8 +1308,8 @@ describe("response command navigation", () => {
         ? Promise.resolve(structuredClone(fresh))
         : command === "project_filters"
           ? Promise.resolve(fresh.project)
-          : command === "project_list"
-            ? Promise.resolve([])
+          : command === "project_list_page"
+            ? Promise.resolve({ offset: 0, total: 0, items: [] })
             : original(command, args),
     );
     render(<App />);
@@ -1546,4 +1550,105 @@ it("cancels a pending multidimensional query and ignores its late result", async
     ([command]) => command === "get_view",
   );
   expect(requests.at(-1)![1].request.filters.log_query.event_ids).toBe("");
+});
+
+it("loads finding details on demand and ignores replies for a previous selection", async () => {
+  const make = (id: string) => ({
+    id,
+    origin: "local:synthetic",
+    severity: "low" as const,
+    title: `合成发现 ${id}`,
+    description: "",
+    evidence_ids: [] as string[],
+    confidence: 0.5,
+    recommendations: [],
+    table_preview: true,
+    evidence_count: 150,
+  });
+  const a = make("A"),
+    b = make("B");
+  const pending: Record<string, (value: any) => void> = {};
+  const original = mock.invoke.getMockImplementation()!;
+  mock.invoke.mockImplementation((command, args) => {
+    if (command === "get_view")
+      return {
+        ...response(args.request),
+        findings: { items: [a, b], total: 2, offset: 0 },
+      };
+    if (command === "get_finding")
+      return new Promise((resolve) => {
+        pending[args.id] = resolve;
+      });
+    return original(command, args);
+  });
+  render(<App />);
+  await waitFor(() => expect(mock.window.onCloseRequested).toHaveBeenCalled());
+  fireEvent.click(screen.getByRole("button", { name: "分析概览" }));
+  fireEvent.click(await screen.findByText("合成发现 A"));
+  await waitFor(() =>
+    expect(mock.invoke).toHaveBeenCalledWith("get_finding", {
+      sessionId: 7,
+      id: "A",
+    }),
+  );
+  fireEvent.click(screen.getByText("合成发现 B"));
+  await waitFor(() =>
+    expect(mock.invoke).toHaveBeenCalledWith("get_finding", {
+      sessionId: 7,
+      id: "B",
+    }),
+  );
+  await act(async () =>
+    pending.B({
+      ...b,
+      table_preview: false,
+      description: "完整说明乙",
+      evidence_ids: ["evidence-b"],
+    }),
+  );
+  await screen.findByText("完整说明乙");
+  expect(
+    await screen.findByRole("button", { name: "evidence-b" }),
+  ).toBeVisible();
+  await act(async () =>
+    pending.A({
+      ...a,
+      table_preview: false,
+      description: "过期说明甲",
+      evidence_ids: ["evidence-a"],
+    }),
+  );
+  expect(screen.queryByText("过期说明甲")).not.toBeInTheDocument();
+  expect(screen.getByRole("button", { name: "evidence-b" })).toBeVisible();
+});
+
+it("keeps parsed log summaries visible when list fields are compacted", async () => {
+  const original = mock.invoke.getMockImplementation()!;
+  mock.invoke.mockImplementation((command, args) => {
+    if (command === "get_view")
+      return {
+        ...response(args.request),
+        records: {
+          offset: 0,
+          total: 1,
+          items: [
+            {
+              ...record,
+              data: {
+                kind: "log",
+                fields: { category: "auth_text", fields: {} },
+              },
+              summary: "账号=合成用户 · 来源=192.0.2.10",
+            },
+          ],
+        },
+      };
+    return original(command, args);
+  });
+  render(<App />);
+  await waitFor(() => expect(mock.window.onCloseRequested).toHaveBeenCalled());
+  fireEvent.click(screen.getByRole("button", { name: "日志证据" }));
+  expect(
+    await screen.findByText("账号=合成用户 · 来源=192.0.2.10"),
+  ).toBeVisible();
 });

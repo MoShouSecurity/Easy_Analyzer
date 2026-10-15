@@ -7,6 +7,7 @@ import type {
   TaskMessage,
 } from "../types";
 import { Button } from "./ui/button";
+import { Pagination } from "./Pagination";
 import { Checkbox } from "./ui/checkbox";
 export function IocView({
   sessionId,
@@ -36,21 +37,31 @@ export function IocView({
   const [subdomains, setSubdomains] = useState(true);
   const [issues, setIssues] = useState<string[]>([]);
   const [working, setWorking] = useState(false);
+  const [loading, setLoading] = useState(false);
+  const viewRequest = useRef(0);
   const policySession = useRef<number | null>(null);
   const load = useCallback(async () => {
+    const request = ++viewRequest.current;
+    setLoading(true);
     try {
       const next = await api.ioc(sessionId, offset, hitOffset);
+      if (request !== viewRequest.current) return;
       if (policySession.current !== sessionId) {
         policySession.current = sessionId;
         setSubdomains(next.status.run?.include_subdomains ?? true);
       }
       setView(next);
     } catch (e) {
-      onError(String(e));
+      if (request === viewRequest.current) onError(String(e));
+    } finally {
+      if (request === viewRequest.current) setLoading(false);
     }
   }, [sessionId, offset, hitOffset]);
   useEffect(() => {
     void load();
+    return () => {
+      viewRequest.current++;
+    };
   }, [load, revision]);
   const add = async (input: IocInput) => {
     setWorking(true);
@@ -71,26 +82,20 @@ export function IocView({
     }
   };
   const disabled = busy || working;
-  const page = (o: number, total: number, set: (v: number) => void) => (
-    <div className="project-actions">
-      <Button
-        variant="ghost"
-        disabled={!o || disabled}
-        onClick={() => set(Math.max(0, o - 100))}
-      >
-        上一页
-      </Button>
-      <span>
-        {total ? o + 1 : 0}–{Math.min(o + 100, total)} / {total}
-      </span>
-      <Button
-        variant="ghost"
-        disabled={o + 100 >= total || disabled}
-        onClick={() => set(o + 100)}
-      >
-        下一页
-      </Button>
-    </div>
+  const page = (
+    o: number,
+    total: number,
+    set: (v: number) => void,
+    label: string,
+  ) => (
+    <Pagination
+      label={label}
+      offset={o}
+      total={total}
+      limit={100}
+      loading={disabled || loading}
+      onPage={set}
+    />
   );
   return (
     <div className="ioc-page">
@@ -206,79 +211,104 @@ export function IocView({
             {view.status.run.include_subdomains ? "包含子域名" : "精确域名"}
           </p>
         )}
-        <table className="project-table">
-          <thead>
-            <tr>
-              <th>类型</th>
-              <th>值</th>
-              <th>说明</th>
-            </tr>
-          </thead>
-          <tbody>
-            {view?.indicators.items.map((i) => (
-              <tr key={i.id}>
-                <td>{i.kind}</td>
-                <td className="mono">{i.value}</td>
-                <td>
-                  <input
-                    aria-label={`说明 ${i.value}`}
-                    disabled={disabled}
-                    defaultValue={i.note}
-                    key={`${i.id}:${i.note}`}
-                    onBlur={(e) => {
-                      if (e.target.value !== i.note)
-                        void api
-                          .iocNote(sessionId, i.id, e.target.value)
-                          .then(async () => {
-                            await load();
-                            await onChanged();
-                          })
-                          .catch((e) => onError(String(e)));
-                    }}
-                  />
-                </td>
+        <div className="ioc-table-scroll">
+          <table className="project-table">
+            <thead>
+              <tr>
+                <th>类型</th>
+                <th>值</th>
+                <th>说明</th>
               </tr>
-            ))}
-          </tbody>
-        </table>
-        {view && page(offset, view.indicators.total, setOffset)}
+            </thead>
+            <tbody>
+              {view?.indicators.items.map((i) => (
+                <tr key={i.id}>
+                  <td>{i.kind}</td>
+                  <td className="mono">{i.value}</td>
+                  <td>
+                    <input
+                      aria-label={`说明 ${i.value}`}
+                      disabled={disabled}
+                      defaultValue={i.note}
+                      key={`${i.id}:${i.note}`}
+                      onBlur={(e) => {
+                        if (e.target.value !== i.note)
+                          void api
+                            .iocNote(sessionId, i.id, e.target.value)
+                            .then(async () => {
+                              await load();
+                              await onChanged();
+                            })
+                            .catch((e) => onError(String(e)));
+                      }}
+                    />
+                  </td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        </div>
+        {view &&
+          page(
+            view.indicators.offset,
+            view.indicators.total,
+            (next) => {
+              if (next === offset) void load();
+              else setOffset(next);
+            },
+            "IOC 清单",
+          )}
       </section>
       <section>
         <h2>匹配结果 · 待核查线索</h2>
-        <table className="project-table">
-          <thead>
-            <tr>
-              <th>IOC</th>
-              <th>匹配值 / 位置</th>
-              <th>证据</th>
-            </tr>
-          </thead>
-          <tbody>
-            {view?.hits.items.map((hit, i) => (
-              <tr key={`${hit.record_id}:${hit.indicator_id}:${i}`}>
-                <td>
-                  {hit.value}
-                  <small>{hit.note}</small>
-                </td>
-                <td>
-                  {hit.matched_value}
-                  <small>
-                    {hit.field}
-                    {hit.byte_offset !== null
-                      ? ` · 字节偏移 ${hit.byte_offset}`
-                      : ""}
-                  </small>
-                </td>
-                <td>
-                  <Button variant="ghost" onClick={() => onJump(hit.record_id)}>
-                    {hit.position}
-                  </Button>
-                </td>
+        <div className="ioc-table-scroll">
+          <table className="project-table">
+            <thead>
+              <tr>
+                <th>IOC</th>
+                <th>匹配值 / 位置</th>
+                <th>证据</th>
               </tr>
-            ))}
-          </tbody>
-        </table>
-        {view && page(hitOffset, view.hits.total, setHitOffset)}
+            </thead>
+            <tbody>
+              {view?.hits.items.map((hit, i) => (
+                <tr key={`${hit.record_id}:${hit.indicator_id}:${i}`}>
+                  <td>
+                    {hit.value}
+                    <small>{hit.note}</small>
+                  </td>
+                  <td>
+                    {hit.matched_value}
+                    <small>
+                      {hit.field}
+                      {hit.byte_offset !== null
+                        ? ` · 字节偏移 ${hit.byte_offset}`
+                        : ""}
+                    </small>
+                  </td>
+                  <td>
+                    <Button
+                      variant="ghost"
+                      onClick={() => onJump(hit.record_id)}
+                    >
+                      {hit.position}
+                    </Button>
+                  </td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        </div>
+        {view &&
+          page(
+            view.hits.offset,
+            view.hits.total,
+            (next) => {
+              if (next === hitOffset) void load();
+              else setHitOffset(next);
+            },
+            "IOC 命中",
+          )}
       </section>
     </div>
   );

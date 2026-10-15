@@ -91,6 +91,8 @@ After opening a project, use “编辑资料” (Edit details) in the toolbar or
 
 On “日志证据” (Log evidence), “多维查询” combines time ranges, levels, client IPs, HTTP status codes, methods, paths, loggers, hosts, and custom fields for Nginx/Apache, common Tomcat/Java application logs, and authentication logs. Windows-specific conditions expand separately. Ascending/descending chronological or original order applies before pagination. An explicit source UTC offset enables queries on full-date logs without a timezone, preserving original evidence. Query settings are saved with the project; see [log queries](docs/PROJECTS.md#日志多维查询).
 
+Projects, evidence, findings, diagnostics, IOCs, AI history, and references support pagination and direct page jumps. Large projects reuse selections and page bookmarks, with full details loaded on demand. See [pagination and large projects](docs/PROJECTS.md#分页与大型项目).
+
 **Projects are saved manually.** Move an `.eair` file to another machine to continue viewing imported evidence and analysis records, without the original input files or a separate database service. Removing a project from the catalog retains its project file, evidence, and IOCs.
 
 ### Command-line CLI

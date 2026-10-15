@@ -106,6 +106,73 @@ fn benchmark_large_project_modules() {
 }
 
 #[test]
+#[ignore = "set EASY_ANALYZER_BENCH_PROJECT to a local .eair file"]
+fn benchmark_large_project_pagination() {
+    let path = std::env::var_os("EASY_ANALYZER_BENCH_PROJECT").expect("project path required");
+    let ctx = ExecutionContext::default();
+    let session = ProjectService::open(Path::new(&path), &ctx).unwrap();
+    let mut retained = Vec::new();
+    for screen in [
+        Screen::Logs,
+        Screen::Processes,
+        Screen::Network,
+        Screen::Overview,
+        Screen::Ai,
+        Screen::Reports,
+    ] {
+        let mut req = request(&session, screen);
+        for step in 0..5 {
+            let start = Instant::now();
+            let (view, selection) = build_view(&session, &req, &ctx).unwrap();
+            let total = match screen {
+                Screen::Reports => view.diagnostics.total,
+                Screen::Network => view.flows.as_ref().map_or(0, |p| p.total),
+                Screen::Overview | Screen::Ai => view.findings.as_ref().map_or(0, |p| p.total),
+                _ => view.records.as_ref().map_or(0, |p| p.total),
+            };
+            println!(
+                "pagination screen={screen:?} step={step} offset={} total={total} seconds={:.4}",
+                if screen == Screen::Reports {
+                    req.diagnostic_offset
+                } else {
+                    req.filters.offset
+                },
+                start.elapsed().as_secs_f64()
+            );
+            if screen == Screen::Logs && step == 0 {
+                let full = session
+                    .page_metadata(selection.as_ref(), 0, req.filters.limit)
+                    .unwrap();
+                println!(
+                    "log_page_payload_bytes before={} after={}",
+                    serde_json::to_vec(&full).unwrap().len(),
+                    serde_json::to_vec(view.records.as_ref().unwrap())
+                        .unwrap()
+                        .len()
+                );
+            }
+            retained.push(selection);
+            let limit = if screen == Screen::Reports {
+                50
+            } else {
+                req.filters.limit
+            };
+            let offset = match step {
+                0 => limit,
+                1 => total / 2 / limit * limit,
+                2 => total.saturating_sub(1) / limit * limit,
+                _ => 0,
+            };
+            if screen == Screen::Reports {
+                req.diagnostic_offset = offset;
+            } else {
+                req.filters.offset = offset;
+            }
+        }
+    }
+}
+
+#[test]
 #[ignore = "synthetic 10000-process and 10000-packet module benchmark"]
 fn benchmark_synthetic_modules() {
     let ctx = ExecutionContext::default();
@@ -272,7 +339,8 @@ fn old_session_and_old_revision_cannot_commit() {
 #[test]
 fn packet_pages_omit_payload_and_raw_but_detail_is_complete() {
     let session = load(&["sample.pcapng"]);
-    let req = request(&session, Screen::Network);
+    let mut req = request(&session, Screen::Network);
+    req.filters.packets = true;
     let (view, _) = build_view(&session, &req, &ExecutionContext::default()).unwrap();
     let page = view.records.unwrap();
     let serialized = serde_json::to_value(&page).unwrap();
@@ -522,4 +590,38 @@ fn log_time_and_field_filters_are_global_and_preserved_across_pages() {
     let legacy: Filters = serde_json::from_value(serde_json::json!({"text":"legacy"})).unwrap();
     assert_eq!(legacy.order, RecordOrder::OriginalAsc);
     assert_eq!(legacy.log_query, LogQuery::default());
+}
+
+#[test]
+fn table_pages_keep_full_details_and_pagination_preserves_selection_identity() {
+    let ctx = ExecutionContext::default();
+    let session = load(&["auth.log"]);
+    let (view, _) = build_view(&session, &request(&session, Screen::Overview), &ctx).unwrap();
+    let header = &view.findings.unwrap().items[0];
+    assert!(header.table_preview);
+    assert!(header.finding.description.is_empty());
+    assert!(header.finding.evidence_ids.is_empty());
+    let full = session.finding_preview(&header.finding.id).unwrap();
+    assert!(!full.table_preview);
+    assert_eq!(full.evidence_count, header.evidence_count);
+    assert!(!full.finding.evidence_ids.is_empty());
+    let desktop = Desktop::new(PathBuf::new(), Args::default());
+    {
+        let mut state = desktop.lock().unwrap();
+        state.session = Some(session.clone());
+        state.latest_view = 1;
+    }
+    let mut req = request(&session, Screen::Logs);
+    let first = publish(&desktop, &session, &req).unwrap();
+    req.filters.offset = 100;
+    let next = publish(&desktop, &session, &req).unwrap();
+    assert_eq!(first.selection.id, next.selection.id);
+    assert_eq!(first.selection.count, next.selection.count);
+    let record = &first.records.unwrap().items[0];
+    if let core::RecordData::Log(data) = &record.data {
+        assert!(!data.fields.contains_key("user"));
+    } else {
+        panic!();
+    }
+    assert!(!session.record(&record.id).unwrap().unwrap().raw.is_empty());
 }

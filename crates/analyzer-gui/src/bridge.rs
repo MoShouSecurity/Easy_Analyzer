@@ -556,7 +556,7 @@ pub fn build_view(
             filter.origin = FindingOrigin::Ai;
         }
         view.findings =
-            Some(session.finding_previews(&filter, filters.offset, filters.limit, ctx)?);
+            Some(session.finding_table_page(&filter, filters.offset, filters.limit, ctx)?);
     }
     let mut valid = None;
     if request.screen.evidence() {
@@ -579,37 +579,23 @@ pub fn build_view(
             selected.clone()
         };
         if request.screen == Screen::Processes && filters.tree && !view.outside {
-            let all = session.process_rows(&displayed, ctx)?;
-            let mut hidden = None;
-            let mut rows = vec![];
-            for row in all {
-                ctx.check()?;
-                if hidden.is_some_and(|depth| row.depth > depth) {
-                    continue;
-                }
-                hidden = None;
-                if filters.collapsed.contains(&row.record_id) && request.focus_id.is_none() {
-                    hidden = Some(row.depth);
-                }
-                rows.push(row);
-            }
-            if let Some(id) = &request.focus_id
-                && let Some(index) = rows.iter().position(|r| &r.record_id == id)
-            {
-                view.offset = index / filters.limit * filters.limit;
-            }
-            let total = rows.len();
-            view.process_rows = rows
-                .into_iter()
-                .skip(view.offset)
-                .take(filters.limit)
-                .collect();
+            let projected = session.process_row_page(
+                &displayed,
+                view.offset,
+                filters.limit,
+                &filters.collapsed,
+                request.focus_id.as_deref(),
+                ctx,
+            )?;
+            view.offset = projected.offset;
+            let total = projected.total;
+            view.process_rows = projected.items;
             let ids = session.select_ids(view.process_rows.iter().map(|r| r.record_id.clone()))?;
             let mut page = session.page_metadata(Some(&ids), 0, filters.limit)?;
             page.total = total;
             page.offset = view.offset;
             view.records = Some(page);
-        } else {
+        } else if request.screen != Screen::Network || filters.packets {
             view.records =
                 Some(session.page_metadata(Some(&displayed), view.offset, filters.limit)?);
             if request.screen == Screen::Processes {
@@ -619,25 +605,45 @@ pub fn build_view(
                     .unwrap()
                     .items
                     .iter()
-                    .map(|r| &r.id)
-                    .collect::<std::collections::HashSet<_>>();
-                view.process_rows = session
-                    .process_rows(&displayed, ctx)?
-                    .into_iter()
-                    .filter(|r| ids.contains(&r.record_id))
-                    .map(|mut r| {
-                        r.depth = 0;
-                        r.has_children = false;
-                        r
-                    })
-                    .collect();
+                    .map(|r| r.id.clone())
+                    .collect::<Vec<_>>();
+                view.process_rows = session.process_list_rows(&displayed, &ids, ctx)?;
             }
         }
-        if request.screen == Screen::Network {
+        if request.screen == Screen::Network && !filters.packets {
             view.flows = Some(session.flow_page(Some(&all), filters.offset, filters.limit, ctx)?);
         }
-        if let Some(records) = &view.records {
-            for record in &records.items {
+        if let Some(records) = &mut view.records {
+            for record in &mut records.items {
+                match &mut record.data {
+                    core::RecordData::Log(log) => {
+                        log.fields.retain(|key, _| {
+                            let key = key.to_lowercase();
+                            matches!(
+                                key.as_str(),
+                                "level"
+                                    | "status"
+                                    | "event_id"
+                                    | "time"
+                                    | "timestamp"
+                                    | "@timestamp"
+                            ) || key.ends_with(".level")
+                                || key.ends_with(".eventid")
+                                || key.ends_with(".eventid.#text")
+                        });
+                        for value in log.fields.values_mut() {
+                            if value.chars().count() > 256 {
+                                *value = value.chars().take(256).collect();
+                            }
+                        }
+                    }
+                    core::RecordData::Process(process) => process.command.clear(),
+                    _ => {}
+                }
+                if record.summary.chars().count() > 1024 {
+                    record.summary = record.summary.chars().take(1024).collect();
+                }
+
                 if !view.record_sources.contains_key(&record.source_id)
                     && let Some(source) = session.source(&record.source_id)?
                 {
@@ -697,7 +703,12 @@ fn commit_view(
         && request.focus_id.is_none()
         && let Some(selected) = selected
     {
-        s.next_selection += 1;
+        if s.selection
+            .as_ref()
+            .is_none_or(|old| !old.same_selection(&selected))
+        {
+            s.next_selection += 1;
+        }
         s.selection_info = SelectionInfo {
             id: s.next_selection,
             count: selected.len(),
@@ -732,6 +743,19 @@ pub async fn get_view(state: State<'_, Desktop>, request: ViewRequest) -> Rpc<Vi
         })
         .await
         .map_err(|e| e.to_string())?,
+    )
+}
+#[tauri::command]
+pub async fn get_finding(
+    state: State<'_, Desktop>,
+    session_id: u64,
+    id: String,
+) -> Rpc<FindingPreview> {
+    let session = rpc(state.session(session_id))?;
+    rpc(
+        tauri::async_runtime::spawn_blocking(move || session.finding_preview(&id))
+            .await
+            .map_err(|e| e.to_string())?,
     )
 }
 #[tauri::command]
@@ -1066,6 +1090,20 @@ fn editable_project(state: &Desktop, id: u64) -> Result<AnalysisSession> {
         .clone()
         .filter(|p| p.id() == id && p.is_project())
         .ok_or_else(|| anyhow!("项目已切换，请刷新"))
+}
+#[tauri::command]
+pub async fn project_list_page(
+    state: State<'_, Desktop>,
+    search: ProjectSearch,
+    offset: usize,
+    limit: usize,
+) -> Rpc<Page<ProjectEntry>> {
+    let root = rpc(state.lock())?.data_dir.clone();
+    rpc(tauri::async_runtime::spawn_blocking(move || {
+        ProjectCatalog::open(&root)?.list_page(&search, offset, limit)
+    })
+    .await
+    .map_err(|e| e.to_string())?)
 }
 #[tauri::command]
 pub async fn project_list(

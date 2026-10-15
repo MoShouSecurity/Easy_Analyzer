@@ -3,6 +3,7 @@ import { LoaderCircle, Pencil } from "lucide-react";
 import { api } from "../lib/api";
 import type { ProjectEntry, ProjectInfo, ProjectStatus } from "../types";
 import { Button } from "./ui/button";
+import { Pagination } from "./Pagination";
 import { Dialog } from "./ui/dialog";
 export function localTimestamp() {
   const now = new Date();
@@ -198,24 +199,56 @@ export function ProjectHome({
   onPick: () => void;
   onError: (e: string) => void;
 }) {
+  const projectScroll = useRef<HTMLDivElement>(null);
+  const browserPanel = useRef<HTMLElement>(null);
+  const shownPage = useRef("0:50");
   const [text, setText] = useState("");
   const [client, setClient] = useState("");
   const [from, setFrom] = useState("");
   const [until, setUntil] = useState("");
   const [rows, setRows] = useState<ProjectEntry[]>([]);
   const [loading, setLoading] = useState(false);
+  const [offset, setOffset] = useState(0);
+  const [shownOffset, setShownOffset] = useState(0);
+  const [limit, setLimit] = useState(50);
+  const [total, setTotal] = useState(0);
   const [refresh, setRefresh] = useState(0);
   const [removal, setRemoval] = useState<ProjectEntry | null>(null);
   const [removing, setRemoving] = useState(false);
   const [removeError, setRemoveError] = useState("");
+  const lastSearch = useRef(JSON.stringify(["", "", "", ""]));
   useEffect(() => {
     let stale = false;
+    const key = JSON.stringify([text, client, from, until]);
+    const delay = key === lastSearch.current ? 0 : 200;
+    setLoading(true);
     const timeout = setTimeout(() => {
-      setLoading(true);
+      lastSearch.current = key;
       api
-        .projects({ text, client, from: from || null, until: until || null })
+        .projectsPage(
+          { text, client, from: from || null, until: until || null },
+          offset,
+          limit,
+        )
         .then((v) => {
-          if (!stale) setRows(v ?? []);
+          if (!stale) {
+            setRows(v?.items ?? []);
+            setTotal(v?.total ?? 0);
+            setShownOffset(v?.offset ?? 0);
+            const pageKey = `${v?.offset ?? 0}:${limit}`;
+            if (pageKey !== shownPage.current) {
+              shownPage.current = pageKey;
+              requestAnimationFrame(() => {
+                const root = projectScroll.current;
+                const panel = browserPanel.current;
+                if (root && panel)
+                  root.scrollTop +=
+                    panel.getBoundingClientRect().top -
+                    root.getBoundingClientRect().top;
+              });
+            }
+            if (v && v.offset !== offset) setOffset(v.offset);
+          }
         })
         .catch((e) => {
           if (!stale) onError(String(e));
@@ -223,12 +256,14 @@ export function ProjectHome({
         .finally(() => {
           if (!stale) setLoading(false);
         });
-    }, 200);
+    }, delay);
     return () => {
       stale = true;
       clearTimeout(timeout);
     };
   }, [
+    offset,
+    limit,
     text,
     client,
     from,
@@ -255,7 +290,7 @@ export function ProjectHome({
     }
   };
   return (
-    <div className="project-page">
+    <div className="project-page" ref={projectScroll}>
       {current && (
         <section
           className="project-current"
@@ -313,12 +348,14 @@ export function ProjectHome({
           </Button>
         </div>
       </section>
-      <section className="project-browser" aria-labelledby="project-list-title">
+      <section
+        ref={browserPanel}
+        className="project-browser"
+        aria-labelledby="project-list-title"
+      >
         <div className="project-list-heading">
           <h3 id="project-list-title">已有项目</h3>
-          <p>
-            按最近打开排序 · {loading ? "正在查询…" : `${rows.length} 个项目`}
-          </p>
+          <p>按最近打开排序 · {loading ? "正在查询…" : `${total} 个项目`}</p>
         </div>
         <details className="project-filters">
           <summary>筛选已有项目</summary>
@@ -330,7 +367,10 @@ export function ProjectHome({
                 aria-label="项目搜索"
                 placeholder="输入关键词查找已有项目"
                 value={text}
-                onChange={(e) => setText(e.target.value)}
+                onChange={(e) => {
+                  setText(e.target.value);
+                  setOffset(0);
+                }}
               />
             </label>
             <label>
@@ -338,7 +378,10 @@ export function ProjectHome({
               <input
                 value={client}
                 placeholder="全部客户单位"
-                onChange={(e) => setClient(e.target.value)}
+                onChange={(e) => {
+                  setClient(e.target.value);
+                  setOffset(0);
+                }}
               />
             </label>
             <label>
@@ -346,7 +389,10 @@ export function ProjectHome({
               <input
                 type="date"
                 value={from}
-                onChange={(e) => setFrom(e.target.value)}
+                onChange={(e) => {
+                  setFrom(e.target.value);
+                  setOffset(0);
+                }}
               />
             </label>
             <label>
@@ -354,7 +400,10 @@ export function ProjectHome({
               <input
                 type="date"
                 value={until}
-                onChange={(e) => setUntil(e.target.value)}
+                onChange={(e) => {
+                  setUntil(e.target.value);
+                  setOffset(0);
+                }}
               />
             </label>
           </div>
@@ -405,6 +454,21 @@ export function ProjectHome({
             </p>
           )}
         </div>
+        <Pagination
+          label="项目"
+          offset={shownOffset}
+          total={total}
+          limit={limit}
+          loading={loading || busy || removing}
+          onPage={(value) => {
+            if (value === offset) setRefresh((v) => v + 1);
+            else setOffset(value);
+          }}
+          onSize={(v) => {
+            setLimit(v);
+            setOffset(0);
+          }}
+        />
       </section>
       <Dialog
         open={removal !== null}

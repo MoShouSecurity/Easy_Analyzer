@@ -102,6 +102,7 @@ fn main() -> anyhow::Result<()> {
         .invoke_handler(tauri::generate_handler![
             bridge::initialize,
             bridge::project_list,
+            bridge::project_list_page,
             bridge::project_remove,
             bridge::project_create,
             bridge::project_open,
@@ -120,6 +121,7 @@ fn main() -> anyhow::Result<()> {
             bridge::reset_session,
             bridge::get_view,
             bridge::get_detail,
+            bridge::get_finding,
             bridge::finding_references,
             bridge::get_ai_batches,
             bridge::apply_config,

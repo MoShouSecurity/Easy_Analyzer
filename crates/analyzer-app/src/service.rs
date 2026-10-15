@@ -316,6 +316,9 @@ impl AnalysisService {
                                 ids: Default::default(),
                                 lazy: None,
                                 order: crate::RecordOrder::default(),
+                                pager: std::sync::Mutex::default(),
+                                process_rows: std::sync::Mutex::default(),
+                                flow_index: std::sync::Mutex::default(),
                                 materialized: Default::default(),
                             })),
                         }

@@ -18,6 +18,7 @@ pub(crate) struct Database {
     pub ai_summary_cache: Mutex<Option<(u64, std::collections::BTreeMap<String, String>)>>,
     pub diagnostic_count_cache: Mutex<Option<(i64, usize)>>,
     pub diagnostic_level_cache: Mutex<Option<(i64, (usize, usize))>>,
+    pub read_cache: Mutex<crate::pagination::ReadCache>,
     pub process_cache: Mutex<Option<(i64, Arc<core::process::ProcessForest>)>>,
 }
 pub(crate) fn json<T: Serialize>(v: &T) -> Result<String> {
@@ -118,6 +119,7 @@ impl Database {
             diagnostic_count_cache: Mutex::default(),
             diagnostic_level_cache: Mutex::default(),
             process_cache: Mutex::default(),
+            read_cache: Mutex::default(),
         })
     }
     pub fn configure(c: &Connection) -> Result<()> {
@@ -131,6 +133,59 @@ impl Database {
         self.connection
             .lock()
             .map_err(|_| anyhow!("项目数据库不可用"))
+    }
+    pub fn cached_count(
+        &self,
+        c: &Connection,
+        sql: &str,
+        args: &[rusqlite::types::Value],
+    ) -> Result<usize> {
+        let revision = crate::project::content_revision(c)?;
+        let key = format!("{sql}:{args:?}");
+        let mut cache = self
+            .read_cache
+            .lock()
+            .map_err(|_| anyhow!("分页缓存不可用"))?;
+        cache.update(revision);
+        if let Some(count) = cache.counts.get(&key) {
+            return Ok(*count);
+        }
+        let count = c.query_row(sql, rusqlite::params_from_iter(args), |r| {
+            r.get::<_, i64>(0)
+        })? as usize;
+        if cache.counts.len() >= 512 {
+            cache.counts.clear();
+        }
+        cache.counts.insert(key, count);
+        Ok(count)
+    }
+    #[allow(clippy::too_many_arguments)]
+    pub fn page_boundary(
+        &self,
+        c: &Connection,
+        table: &str,
+        condition: &str,
+        args: &[rusqlite::types::Value],
+        key: &str,
+        descending: bool,
+        total: usize,
+        offset: usize,
+    ) -> Result<Option<i64>> {
+        let revision = crate::project::content_revision(c)?;
+        let cache_key = format!("{table}:{condition}:{args:?}:{key}:{descending}:{total}");
+        let mut cache = self
+            .read_cache
+            .lock()
+            .map_err(|_| anyhow!("分页缓存不可用"))?;
+        cache.update(revision);
+        if cache.pagers.len() >= 32 && !cache.pagers.contains_key(&cache_key) {
+            cache.pagers.clear();
+        }
+        cache
+            .pagers
+            .entry(cache_key)
+            .or_default()
+            .boundary(c, table, condition, args, key, descending, total, offset)
     }
     pub fn set<T: Serialize>(c: &Connection, key: &str, value: &T) -> Result<()> {
         c.execute("INSERT INTO metadata VALUES(?1,?2) ON CONFLICT(key) DO UPDATE SET value=excluded.value", params![key,json(value)?])?;
@@ -467,20 +522,37 @@ impl Database {
         page_limit(limit)?;
         let c = self.lock()?;
         let mut membership = selection.membership();
-        membership.arguments.push((limit as i64).into());
-        membership
-            .arguments
-            .push((offset.min(selection.count) as i64).into());
-        let data = if payload {
-            "r.data"
-        } else {
-            "COALESCE(NULLIF(r.preview,''),r.data)"
-        };
-        let mut stmt = c.prepare(&format!("SELECT r.id,r.source_id,r.timestamp,r.status,{data},r.summary FROM records r WHERE {} ORDER BY {} LIMIT ? OFFSET ?", membership.predicate, selection.order.sql()))?;
-        let mut rows = stmt.query(rusqlite::params_from_iter(&membership.arguments))?;
+        let descending = selection.order == RecordOrder::OriginalDesc;
+        let mut pager = selection
+            .pager
+            .lock()
+            .map_err(|_| anyhow!("分页缓存不可用"))?;
+        let boundary = pager.boundary(
+            &c,
+            "records r",
+            &membership.predicate,
+            &membership.arguments,
+            "r.ordinal",
+            descending,
+            selection.count,
+            offset,
+        )?;
         let mut items = Vec::new();
-        while let Some(r) = rows.next()? {
-            items.push(Self::summary_row(r)?);
+        if let Some(boundary) = boundary {
+            membership.arguments.push(boundary.into());
+            membership.arguments.push((limit as i64).into());
+            let data = if payload {
+                "r.data"
+            } else {
+                "COALESCE(NULLIF(r.preview,''),r.data)"
+            };
+            let comparison = if descending { "<=" } else { ">=" };
+            let mut stmt = c.prepare(&format!("SELECT r.id,r.source_id,r.timestamp,r.status,{data},r.summary,r.ordinal FROM records r WHERE {} AND r.ordinal{comparison}? ORDER BY {} LIMIT ?", membership.predicate, selection.order.sql()))?;
+            let mut rows = stmt.query(rusqlite::params_from_iter(&membership.arguments))?;
+            while let Some(r) = rows.next()? {
+                pager.remember(offset + items.len(), r.get(6)?);
+                items.push(Self::summary_row(r)?);
+            }
         }
         Ok(Page {
             offset,
@@ -537,6 +609,9 @@ pub(crate) struct StoredSelection {
     pub ids: std::sync::OnceLock<Vec<String>>,
     pub lazy: Option<SqlSelection>,
     pub order: RecordOrder,
+    pub pager: Mutex<crate::pagination::OrdinalPager>,
+    pub process_rows: Mutex<Option<(u64, Arc<Vec<ProcessRow>>)>>,
+    pub flow_index: Mutex<Option<(u64, i64)>>,
     pub materialized: std::sync::OnceLock<()>,
 }
 #[derive(Debug)]
@@ -723,6 +798,9 @@ impl Database {
                     arguments: args,
                 }),
                 order: filter.order,
+                pager: Mutex::default(),
+                process_rows: Mutex::default(),
+                flow_index: Mutex::default(),
                 materialized: Default::default(),
             })),
         })
@@ -810,38 +888,119 @@ impl Database {
         }
         Ok(out)
     }
+    pub fn finding_headers(
+        &self,
+        filter: &FindingFilter,
+        offset: usize,
+        limit: usize,
+        ctx: &ExecutionContext,
+    ) -> Result<Page<Finding>> {
+        page_limit(limit)?;
+        let c = self.lock()?;
+        with_progress(&c, ctx, || {
+            let origin = match filter.origin {
+                FindingOrigin::All => "1=1",
+                FindingOrigin::Local => "origin LIKE 'local:%'",
+                FindingOrigin::Ai => "origin NOT LIKE 'local:%'",
+            };
+            let condition = format!("severity=? AND {origin}");
+            let mut counts = vec![];
+            for rank in (0..=4).rev() {
+                if filter.severity.as_ref().is_some_and(|s| s.rank() != rank) {
+                    continue;
+                }
+                let args = vec![rusqlite::types::Value::Integer(rank as i64)];
+                let count = self.cached_count(
+                    &c,
+                    &format!("SELECT COUNT(*) FROM findings WHERE {condition}"),
+                    &args,
+                )?;
+                counts.push((args, count));
+            }
+            let total = counts.iter().map(|(_, n)| *n).sum();
+            let mut skip = offset;
+            let mut items = vec![];
+            for (mut args, count) in counts {
+                if skip >= count {
+                    skip -= count;
+                    continue;
+                }
+                let boundary = self
+                    .page_boundary(
+                        &c, "findings", &condition, &args, "ordinal", false, count, skip,
+                    )?
+                    .unwrap_or(i64::MAX);
+                args.push(boundary.into());
+                args.push(((limit - items.len()) as i64).into());
+                items.extend(values::<Finding>(&c,&format!("SELECT json FROM findings WHERE {condition} AND ordinal>=? ORDER BY ordinal LIMIT ?"),rusqlite::params_from_iter(args))?);
+                skip = 0;
+                if items.len() == limit {
+                    break;
+                }
+            }
+            Ok(Page {
+                offset,
+                total,
+                items,
+            })
+        })
+    }
     pub fn finding_page(
         &self,
         filter: &FindingFilter,
         offset: usize,
         limit: usize,
     ) -> Result<Page<Finding>> {
+        let page = self.finding_headers(filter, offset, limit, &ExecutionContext::default())?;
+        let c = self.lock()?;
+        let items = page
+            .items
+            .into_iter()
+            .map(|finding| Self::finding(&c, json(&finding)?))
+            .collect::<Result<Vec<_>>>()?;
+        Ok(Page {
+            offset,
+            total: page.total,
+            items,
+        })
+    }
+    pub fn reference_page(&self, id: &str, offset: usize, limit: usize) -> Result<Page<String>> {
         page_limit(limit)?;
         let c = self.lock()?;
-        let local = match filter.origin {
-            FindingOrigin::All => None,
-            FindingOrigin::Local => Some(true),
-            FindingOrigin::Ai => Some(false),
-        };
-        let args = params![filter.severity.as_ref().map(|s| s.rank()), local];
-        let condition =
-            "(?1 IS NULL OR severity=?1) AND (?2 IS NULL OR (origin LIKE 'local:%')=?2)";
-        let total = c.query_row(
-            &format!("SELECT COUNT(*) FROM findings WHERE {condition}"),
-            args,
-            |r| r.get::<_, i64>(0).map(|n| n as usize),
-        )?;
-        let mut s=c.prepare(&format!("SELECT json FROM findings WHERE {condition} ORDER BY severity DESC,ordinal LIMIT ?3 OFFSET ?4"))?;
-        let mut rows = s.query(params![
-            filter.severity.as_ref().map(|s| s.rank()),
-            local,
-            limit as i64,
-            offset.min(i64::MAX as usize) as i64
-        ])?;
-        let mut items = vec![];
-        while let Some(r) = rows.next()? {
-            items.push(Self::finding(&c, r.get(0)?)?);
+        if !c.query_row(
+            "SELECT EXISTS(SELECT 1 FROM findings WHERE id=?1)",
+            [id],
+            |r| r.get::<_, bool>(0),
+        )? {
+            bail!("发现不属于当前项目");
         }
+        let revision = crate::project::content_revision(&c)?;
+        let mut cache = self
+            .read_cache
+            .lock()
+            .map_err(|_| anyhow!("引用分页缓存不可用"))?;
+        cache.update(revision);
+        c.execute_batch("CREATE TEMP TABLE IF NOT EXISTS page_references(finding_id TEXT NOT NULL,ordinal INTEGER NOT NULL,record_id TEXT NOT NULL,PRIMARY KEY(finding_id,ordinal));")?;
+        if !cache.references.contains_key(id) {
+            if cache.references.len() >= 8 {
+                cache.references.clear();
+            }
+            if cache.references.is_empty() {
+                c.execute("DELETE FROM page_references", [])?;
+            }
+            let total = with_progress(&c, &ExecutionContext::default(), || {
+                Ok(c.execute("INSERT INTO page_references SELECT ?1,ROW_NUMBER() OVER(ORDER BY ordinal,record_id)-1,record_id FROM finding_refs WHERE finding_id=?1",[id])?)
+            })?;
+            cache.references.insert(id.into(), total);
+        }
+        let total = cache.references[id];
+        let mut stmt=c.prepare("SELECT record_id FROM page_references WHERE finding_id=?1 AND ordinal>=?2 ORDER BY ordinal LIMIT ?3")?;
+        let items = stmt
+            .query_map(
+                params![id, offset.min(i64::MAX as usize) as i64, limit as i64],
+                |r| r.get(0),
+            )?
+            .collect::<rusqlite::Result<Vec<_>>>()?;
         Ok(Page {
             offset,
             total,
@@ -853,11 +1012,24 @@ impl Database {
         let c = self.lock()?;
         Ok(Page {
             offset,
-            total: scalar(&c, "SELECT COUNT(*) FROM sources")?,
+            total: self.cached_count(&c, "SELECT COUNT(*) FROM sources", &[])?,
             items: values(
                 &c,
-                "SELECT json FROM sources ORDER BY rowid LIMIT ?1 OFFSET ?2",
-                params![limit as i64, offset.min(i64::MAX as usize) as i64],
+                "SELECT json FROM sources WHERE rowid>=?1 ORDER BY rowid LIMIT ?2",
+                params![
+                    self.page_boundary(
+                        &c,
+                        "sources",
+                        "1=1",
+                        &[],
+                        "rowid",
+                        false,
+                        self.cached_count(&c, "SELECT COUNT(*) FROM sources", &[])?,
+                        offset
+                    )?
+                    .unwrap_or(i64::MAX),
+                    limit as i64
+                ],
             )?,
         })
     }
@@ -870,8 +1042,21 @@ impl Database {
             total,
             items: values(
                 &c,
-                "SELECT json FROM diagnostics ORDER BY ordinal LIMIT ?1 OFFSET ?2",
-                params![limit as i64, offset.min(i64::MAX as usize) as i64],
+                "SELECT json FROM diagnostics WHERE ordinal>=?1 ORDER BY ordinal LIMIT ?2",
+                params![
+                    self.page_boundary(
+                        &c,
+                        "diagnostics",
+                        "1=1",
+                        &[],
+                        "ordinal",
+                        false,
+                        total,
+                        offset
+                    )?
+                    .unwrap_or(i64::MAX),
+                    limit as i64
+                ],
             )?,
         })
     }
@@ -937,51 +1122,65 @@ impl Database {
         ctx: &ExecutionContext,
     ) -> Result<Page<FlowSummary>> {
         page_limit(limit)?;
+        ctx.check()?;
         let c = self.lock()?;
-        let membership = selection.map(StoredSelection::membership);
-        let predicate = membership.as_ref().map_or_else(|| "1=1".into(), |m| format!("EXISTS(SELECT 1 FROM flow_refs e JOIN records r ON r.id=e.record_id WHERE e.flow_id=f.ordinal AND {})",m.predicate));
-        let args = membership
-            .as_ref()
-            .map_or_else(Vec::new, |m| m.arguments.clone());
-        let total = with_progress(&c, ctx, || {
-            Ok(c.query_row(
-                &format!("SELECT COUNT(*) FROM flows f WHERE {predicate}"),
-                rusqlite::params_from_iter(&args),
-                |r| r.get::<_, i64>(0).map(|n| n as usize),
-            )?)
+        let (total, sql, args): (usize, String, Vec<rusqlite::types::Value>) = if let Some(
+            selection,
+        ) = selection
+        {
+            let revision = crate::project::content_revision(&c)?;
+            let mut cached = selection
+                .flow_index
+                .lock()
+                .map_err(|_| anyhow!("会话分页缓存不可用"))?;
+            if cached.as_ref().is_none_or(|(old, _)| *old != revision) {
+                c.execute_batch("CREATE TEMP TABLE IF NOT EXISTS page_flows(selection_id INTEGER NOT NULL,ordinal INTEGER NOT NULL,flow_id INTEGER NOT NULL,matched INTEGER NOT NULL,PRIMARY KEY(selection_id,ordinal));")?;
+                let membership = selection.membership();
+                c.execute(
+                    "DELETE FROM page_flows WHERE selection_id=?1",
+                    [selection.id],
+                )?;
+                let mut args = vec![selection.id.into()];
+                args.extend(membership.arguments);
+                let total = with_progress(&c, ctx, || {
+                    Ok(c.execute(&format!("INSERT INTO page_flows SELECT ?,ROW_NUMBER() OVER(ORDER BY f.ordinal)-1,f.ordinal,COUNT(*) FROM flows f JOIN flow_refs e ON e.flow_id=f.ordinal JOIN records r ON r.id=e.record_id WHERE {} GROUP BY f.ordinal",membership.predicate),rusqlite::params_from_iter(args))?)
+                })?;
+                *cached = Some((revision, total as i64));
+            }
+            let total = cached.as_ref().unwrap().1 as usize;
+            (total,"SELECT f.ordinal,f.source_id,f.json,p.matched FROM page_flows p JOIN flows f ON f.ordinal=p.flow_id WHERE p.selection_id=? AND p.ordinal>=? ORDER BY p.ordinal LIMIT ?".to_string(),vec![selection.id.into(),(offset.min(i64::MAX as usize) as i64).into(),(limit as i64).into()])
+        } else {
+            let total = self.cached_count(&c, "SELECT COUNT(*) FROM flows", &[])?;
+            let boundary = self
+                .page_boundary(&c, "flows", "1=1", &[], "ordinal", false, total, offset)?
+                .unwrap_or(i64::MAX);
+            (total,"SELECT ordinal,source_id,json,NULL FROM flows WHERE ordinal>=? ORDER BY ordinal LIMIT ?".to_string(),vec![boundary.into(),(limit as i64).into()])
+        };
+        let items = with_progress(&c, ctx, || {
+            let mut stmt = c.prepare(&sql)?;
+            let mut rows = stmt.query(rusqlite::params_from_iter(args))?;
+            let mut items = vec![];
+            while let Some(row) = rows.next()? {
+                ctx.check()?;
+                let id: i64 = row.get(0)?;
+                let flow: NetworkFlow = decode(row.get(2)?)?;
+                items.push(FlowSummary {
+                    key: (id - 1) as usize,
+                    source_id: row.get(1)?,
+                    endpoint_a: flow.endpoint_a,
+                    endpoint_b: flow.endpoint_b,
+                    protocol: flow.protocol,
+                    packets: flow.packets,
+                    matched_packets: row
+                        .get::<_, Option<i64>>(3)?
+                        .map_or(flow.packets, |n| n as usize),
+                    bytes: flow.bytes,
+                    first_seen: flow.first_seen,
+                    last_seen: flow.last_seen,
+                });
+            }
+            Ok(items)
         })?;
-        let mut page_args = args.clone();
-        page_args.push((limit as i64).into());
-        page_args.push((offset.min(i64::MAX as usize) as i64).into());
-        let mut stmt=c.prepare(&format!("SELECT ordinal,source_id,json FROM flows f WHERE {predicate} ORDER BY ordinal LIMIT ? OFFSET ?"))?;
-        let mut rows = stmt.query(rusqlite::params_from_iter(page_args))?;
-        let mut items = vec![];
-        while let Some(r) = rows.next()? {
-            let id: i64 = r.get(0)?;
-            let f: NetworkFlow = decode(r.get(2)?)?;
-            ctx.check()?;
-            let matched = if let Some(m) = &membership {
-                let mut count_args = vec![id.into()];
-                count_args.extend(args.clone());
-                with_progress(&c, ctx, || {
-                    Ok(c.query_row(&format!("SELECT COUNT(*) FROM flow_refs e JOIN records r ON r.id=e.record_id WHERE e.flow_id=? AND {}",m.predicate),rusqlite::params_from_iter(count_args),|r|r.get::<_,i64>(0).map(|n|n as usize))?)
-                })?
-            } else {
-                f.packets
-            };
-            items.push(FlowSummary {
-                key: (id - 1) as usize,
-                source_id: r.get(1)?,
-                endpoint_a: f.endpoint_a,
-                endpoint_b: f.endpoint_b,
-                protocol: f.protocol,
-                packets: f.packets,
-                matched_packets: matched,
-                bytes: f.bytes,
-                first_seen: f.first_seen,
-                last_seen: f.last_seen,
-            });
-        }
         Ok(Page {
             offset,
             total,
@@ -1033,6 +1232,9 @@ impl Database {
                 ids: Default::default(),
                 lazy: None,
                 order: crate::RecordOrder::default(),
+                pager: Mutex::default(),
+                process_rows: Mutex::default(),
+                flow_index: Mutex::default(),
                 materialized: Default::default(),
             })),
         })
@@ -1102,6 +1304,7 @@ impl Drop for StoredSelection {
         if let Ok(c) = self.db.lock() {
             let current = Database::get::<Option<i64>>(&c, "query_selection").unwrap_or(None);
             if current != Some(self.id) {
+                let _ = c.execute("DELETE FROM page_flows WHERE selection_id=?1", [self.id]);
                 let _ = c.execute("DELETE FROM selections WHERE id=?1", [self.id]);
             }
         }

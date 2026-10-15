@@ -110,14 +110,18 @@ it("validates response times and preserves metadata until accepted", async () =>
   expect(screen.getByLabelText("项目名称")).toHaveValue("合成项目");
 });
 it("searches project metadata and clearly identifies missing files", async () => {
-  mock.invoke.mockResolvedValue([
-    {
-      info: { ...newProject(), name: "合成响应", client: "合成客户" },
-      path: "/tmp/moved.eair",
-      last_opened: "2026-10-05T10:00:00Z",
-      missing: true,
-    },
-  ]);
+  mock.invoke.mockResolvedValue({
+    offset: 0,
+    total: 1,
+    items: [
+      {
+        info: { ...newProject(), name: "合成响应", client: "合成客户" },
+        path: "/tmp/moved.eair",
+        last_opened: "2026-10-05T10:00:00Z",
+        missing: true,
+      },
+    ],
+  });
   render(
     <ProjectHome
       busy={false}
@@ -134,7 +138,7 @@ it("searches project metadata and clearly identifies missing files", async () =>
   });
   await waitFor(() =>
     expect(mock.invoke).toHaveBeenCalledWith(
-      "project_list",
+      "project_list_page",
       expect.objectContaining({
         search: expect.objectContaining({ text: "合成" }),
       }),
@@ -239,7 +243,8 @@ it("requires confirmation to remove only the selected catalog entry and refreshe
   const b = projectEntry("合成响应乙");
   let entries = [a, b];
   mock.invoke.mockImplementation(async (command: string) => {
-    if (command === "project_list") return entries;
+    if (command === "project_list_page")
+      return { offset: 0, total: entries.length, items: entries };
     if (command === "project_remove") entries = [b];
   });
   render(<ProjectHome {...homeProps} />);
@@ -271,14 +276,17 @@ it("requires confirmation to remove only the selected catalog entry and refreshe
   await screen.findByText("按最近打开排序 · 1 个项目");
   await waitFor(() =>
     expect(
-      mock.invoke.mock.calls.filter(([command]) => command === "project_list"),
+      mock.invoke.mock.calls.filter(
+        ([command]) => command === "project_list_page",
+      ),
     ).toHaveLength(2),
   );
 });
 it("preserves the list and displays errors when removal fails", async () => {
   const entry = projectEntry("合成响应");
   mock.invoke.mockImplementation(async (command: string) => {
-    if (command === "project_list") return [entry];
+    if (command === "project_list_page")
+      return { offset: 0, total: 1, items: [entry] };
     if (command === "project_remove") throw new Error("项目目录不可用");
   });
   render(<ProjectHome {...homeProps} />);
@@ -296,7 +304,12 @@ it("allows missing entries to be removed and prevents duplicate requests while p
   let finish!: () => void;
   let entries = [entry];
   mock.invoke.mockImplementation((command: string) => {
-    if (command === "project_list") return Promise.resolve(entries);
+    if (command === "project_list_page")
+      return Promise.resolve({
+        offset: 0,
+        total: entries.length,
+        items: entries,
+      });
     if (command === "project_remove")
       return new Promise<void>((resolve) => {
         finish = () => {
@@ -392,5 +405,77 @@ it("mixes IOC paste and manual inputs and explicitly scans with exact domain pol
       sessionId: 7,
       includeSubdomains: false,
     }),
+  );
+});
+
+it("pages projects on the server and resets the page after filtering", async () => {
+  const entries = Array.from({ length: 125 }, (_, i) =>
+    projectEntry(`合成项目${i}`),
+  );
+  mock.invoke.mockImplementation(async (command: string, args: any) =>
+    command === "project_list_page"
+      ? {
+          offset: args.offset,
+          total: 125,
+          items: entries.slice(args.offset, args.offset + args.limit),
+        }
+      : undefined,
+  );
+  render(<ProjectHome {...homeProps} />);
+  await screen.findByText("合成项目0");
+  fireEvent.click(screen.getByRole("button", { name: "项目 下一页" }));
+  await screen.findByText("合成项目50");
+  expect(mock.invoke).toHaveBeenCalledWith(
+    "project_list_page",
+    expect.objectContaining({ offset: 50, limit: 50 }),
+  );
+  fireEvent.click(screen.getByRole("button", { name: "项目 末页" }));
+  await screen.findByText("合成项目124");
+  fireEvent.change(screen.getByLabelText("项目搜索"), {
+    target: { value: "筛选" },
+  });
+  await waitFor(() =>
+    expect(mock.invoke).toHaveBeenCalledWith(
+      "project_list_page",
+      expect.objectContaining({
+        offset: 0,
+        search: expect.objectContaining({ text: "筛选" }),
+      }),
+    ),
+  );
+});
+
+it("keeps the displayed project page after failure and retries the same next page", async () => {
+  const entries = Array.from({ length: 75 }, (_, i) =>
+    projectEntry(`项目${i}`),
+  );
+  const error = vi.fn();
+  let failed = false;
+  mock.invoke.mockImplementation(async (command: string, args: any) => {
+    if (command !== "project_list_page") return undefined;
+    if (args.offset === 50 && !failed) {
+      failed = true;
+      throw new Error("模拟分页故障");
+    }
+    return {
+      offset: args.offset,
+      total: entries.length,
+      items: entries.slice(args.offset, args.offset + args.limit),
+    };
+  });
+  render(<ProjectHome {...homeProps} onError={error} />);
+  await screen.findByText("项目0");
+  fireEvent.click(screen.getByRole("button", { name: "项目 下一页" }));
+  await waitFor(() => expect(error).toHaveBeenCalled());
+  expect(screen.getByText("项目0")).toBeVisible();
+  expect(screen.getByRole("spinbutton", { name: "项目 跳转页码" })).toHaveValue(
+    1,
+  );
+  fireEvent.click(screen.getByRole("button", { name: "项目 下一页" }));
+  await screen.findByText("项目50");
+  await waitFor(() =>
+    expect(
+      screen.getByRole("spinbutton", { name: "项目 跳转页码" }),
+    ).toHaveValue(2),
   );
 });

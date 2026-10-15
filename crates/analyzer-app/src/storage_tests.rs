@@ -334,3 +334,148 @@ fn diagnostic_caches_and_paged_ai_headers_refresh_without_loading_replies() {
             .is_err()
     );
 }
+
+#[test]
+fn findings_and_reference_pages_preserve_order_refresh_after_writes_and_save_cleanly() {
+    let session = project();
+    let text = (0..150)
+        .map(|i| format!("synthetic record {i}\n"))
+        .collect::<String>();
+    append(&session, "synthetic-pagination.log", &text);
+    let ids = session
+        .page_metadata(None, 0, 200)
+        .unwrap()
+        .items
+        .into_iter()
+        .map(|r| r.id)
+        .collect::<Vec<_>>();
+    let ctx = ExecutionContext::default();
+    let db = session.0.store.as_ref().unwrap();
+    let base = core::Finding {
+        id: "finding-0".into(),
+        origin: "local:synthetic".into(),
+        severity: core::Severity::Info,
+        title: "Synthetic finding".into(),
+        description: "Complete explanation retained".into(),
+        evidence_ids: ids[..125].to_vec(),
+        confidence: 0.5,
+        recommendations: vec!["Read-only investigation".into()],
+    };
+    {
+        let c = db.lock().unwrap();
+        for i in 0..125 {
+            let finding = core::Finding {
+                id: format!("finding-{i}"),
+                origin: if i % 2 == 0 {
+                    "local:synthetic"
+                } else {
+                    "ai:synthetic"
+                }
+                .into(),
+                severity: [
+                    core::Severity::Info,
+                    core::Severity::Low,
+                    core::Severity::Medium,
+                    core::Severity::High,
+                    core::Severity::Critical,
+                ][i % 5]
+                    .clone(),
+                evidence_ids: if i == 0 {
+                    ids[..125].to_vec()
+                } else {
+                    vec![ids[i].clone()]
+                },
+                ..base.clone()
+            };
+            Database::insert_finding(&c, &finding).unwrap();
+        }
+        crate::project::touch(&c).unwrap();
+    }
+    for origin in [FindingOrigin::All, FindingOrigin::Local, FindingOrigin::Ai] {
+        let filter = FindingFilter {
+            origin,
+            ..Default::default()
+        };
+        let expected = {
+            let c = db.lock().unwrap();
+            let clause = match origin {
+                FindingOrigin::All => "1=1",
+                FindingOrigin::Local => "origin LIKE 'local:%'",
+                FindingOrigin::Ai => "origin NOT LIKE 'local:%'",
+            };
+            c.prepare(&format!(
+                "SELECT id FROM findings WHERE {clause} ORDER BY severity DESC,ordinal"
+            ))
+            .unwrap()
+            .query_map([], |r| r.get::<_, String>(0))
+            .unwrap()
+            .collect::<rusqlite::Result<Vec<_>>>()
+            .unwrap()
+        };
+        for offset in [0, 25, 50, 100, 125, 999] {
+            let page = session
+                .finding_table_page(&filter, offset, 50, &ctx)
+                .unwrap();
+            assert_eq!(page.total, expected.len());
+            assert_eq!(
+                page.items
+                    .iter()
+                    .map(|f| f.finding.id.clone())
+                    .collect::<Vec<_>>(),
+                expected
+                    .iter()
+                    .skip(offset)
+                    .take(50)
+                    .cloned()
+                    .collect::<Vec<_>>()
+            );
+            assert!(page.items.iter().all(|f| f.table_preview
+                && f.finding.evidence_ids.is_empty()
+                && f.finding.description.is_empty()));
+        }
+    }
+    let tail = session.finding_references("finding-0", 100, 50).unwrap();
+    assert_eq!(tail.total, 125);
+    assert_eq!(tail.items, ids[100..125]);
+    {
+        let c = db.lock().unwrap();
+        Database::insert_finding(
+            &c,
+            &core::Finding {
+                evidence_ids: ids.clone(),
+                ..base
+            },
+        )
+        .unwrap();
+        crate::project::touch(&c).unwrap();
+    }
+    assert_eq!(
+        session
+            .finding_references("finding-0", 100, 50)
+            .unwrap()
+            .items,
+        ids[100..]
+    );
+    let full = session.finding_preview("finding-0").unwrap();
+    assert_eq!(full.evidence_count, 150);
+    assert_eq!(full.finding.evidence_ids.len(), 100);
+    assert_eq!(full.finding.description, "Complete explanation retained");
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("pagination.eair");
+    ProjectService::save(
+        &session,
+        &path,
+        &dir.path().join("config.toml"),
+        false,
+        &ctx,
+    )
+    .unwrap();
+    let reopened = ProjectService::open(&path, &ctx).unwrap();
+    assert_eq!(
+        reopened
+            .finding_references("finding-0", 100, 50)
+            .unwrap()
+            .items,
+        ids[100..]
+    );
+}

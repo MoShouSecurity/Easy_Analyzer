@@ -2671,3 +2671,53 @@ small {
   font-size: 12px;
   margin-bottom: 10px;
 }
+
+.pagination {
+  flex-shrink: 0;
+  flex-wrap: wrap;
+  height: auto;
+  gap: 5px;
+  padding: 6px 10px;
+}
+.pagination > div {
+  flex-wrap: wrap;
+}
+.page-jump {
+  display: flex;
+  align-items: center;
+  gap: 2px;
+}
+.page-jump input {
+  width: 62px;
+  height: 26px;
+  border: 1px solid var(--line);
+  border-radius: 4px;
+  background: var(--surface);
+  color: var(--text);
+  padding: 2px 4px;
+}
+.pagination .page-jump .btn {
+  width: auto;
+  padding: 0 5px;
+}
+
+.project-browser > .pagination {
+  position: sticky;
+  bottom: 0;
+  z-index: 1;
+  background: var(--surface);
+  margin: 0 -20px -20px;
+  padding: 8px 10px;
+}
+.project-page .page-jump input,
+.ioc-page .page-jump input {
+  width: 62px;
+  height: 26px;
+  padding: 2px 4px;
+}
+
+.ioc-table-scroll {
+  max-height: 320px;
+  overflow: auto;
+  min-width: 0;
+}

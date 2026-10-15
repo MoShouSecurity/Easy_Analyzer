@@ -80,6 +80,7 @@ import { Checkbox } from "./components/ui/checkbox";
 import { Dialog } from "./components/ui/dialog";
 import { Tooltip, TooltipProvider } from "./components/ui/tooltip";
 import { Tabs } from "./components/ui/tabs";
+import { Pagination } from "./components/Pagination";
 import { DataTable } from "./components/DataTable";
 import { Inspector, SourceInspector, Risk } from "./components/Inspector";
 import { ImportView } from "./components/ImportView";
@@ -802,6 +803,23 @@ export function App() {
     detailRevision.current++;
     setDetailLoading(false);
     setFinding(value);
+    if (value.table_preview && session.current !== null) {
+      const sid = session.current,
+        revision = ++detailRevision.current;
+      setDetailLoading(true);
+      void api
+        .finding(sid, value.id)
+        .then((full) => {
+          if (session.current === sid && detailRevision.current === revision)
+            setFinding(full);
+        })
+        .catch((e) => {
+          if (detailRevision.current === revision) setError(String(e));
+        })
+        .finally(() => {
+          if (detailRevision.current === revision) setDetailLoading(false);
+        });
+    }
     setDetail(null);
     setSelectedId(null);
     setDrawer(true);
@@ -1271,8 +1289,7 @@ export function App() {
             >
               {r.data.kind === "process"
                 ? r.data.fields.name
-                : r.data.kind === "log" &&
-                    !Object.keys(r.data.fields.fields).length
+                : r.data.kind === "log" && r.status !== "parsed"
                   ? "点击查看原始记录"
                   : r.summary}
             </span>
@@ -2015,31 +2032,17 @@ export function App() {
                     )}
                   </div>
                   {data && data.sources.total > 100 && (
-                    <div className="source-filter-pager">
-                      <span>
-                        来源 {sourceOffset + 1}–
-                        {Math.min(sourceOffset + 100, data.sources.total)} /{" "}
-                        {data.sources.total}
-                      </span>
-                      <Button
-                        variant="ghost"
-                        size="sm"
-                        disabled={!sourceOffset}
-                        onClick={() =>
-                          setSourceOffset(Math.max(0, sourceOffset - 100))
-                        }
-                      >
-                        上一组
-                      </Button>
-                      <Button
-                        variant="ghost"
-                        size="sm"
-                        disabled={sourceOffset + 100 >= data.sources.total}
-                        onClick={() => setSourceOffset(sourceOffset + 100)}
-                      >
-                        下一组
-                      </Button>
-                    </div>
+                    <Pagination
+                      label="筛选来源"
+                      offset={data.sources.offset}
+                      total={data.sources.total}
+                      limit={100}
+                      loading={loading}
+                      onPage={(offset) => {
+                        if (offset === sourceOffset) void refresh();
+                        else setSourceOffset(offset);
+                      }}
+                    />
                   )}
                   {screen === "processes" && (
                     <div className="view-mode">
@@ -2364,40 +2367,24 @@ export function App() {
                       empty="尚未导入来源"
                     />
                   </div>
-                  <div className="group-pager">
-                    <span>
-                      {data
-                        ? `${sourceOffset + 1}–${Math.min(sourceOffset + 100, data.sources.total)} / ${data.sources.total} 个来源`
-                        : "0 个来源"}
-                    </span>
-                    <Button
-                      variant="ghost"
-                      size="sm"
-                      disabled={!sourceOffset}
-                      onClick={() =>
-                        setSourceOffset(Math.max(0, sourceOffset - 100))
-                      }
-                    >
-                      上一组
-                    </Button>
-                    <Button
-                      variant="ghost"
-                      size="sm"
-                      disabled={
-                        !data || sourceOffset + 100 >= data.sources.total
-                      }
-                      onClick={() => setSourceOffset(sourceOffset + 100)}
-                    >
-                      下一组
-                    </Button>
-                  </div>
+                  <Pagination
+                    label="来源"
+                    offset={data?.sources.offset || 0}
+                    total={data?.sources.total || 0}
+                    limit={100}
+                    loading={loading || !data}
+                    onPage={(offset) => {
+                      if (offset === sourceOffset) void refresh();
+                      else setSourceOffset(offset);
+                    }}
+                  />
                   <div className="table-section-heading">
                     <span>
                       诊断 <small>{data?.diagnostics.total || 0}</small>
                     </span>
                     <small>保留未完成范围与解析问题</small>
                   </div>
-                  <div className="diagnostic-list">
+                  <div className="diagnostic-list" key={diagnosticOffset}>
                     {data?.diagnostics.items.map((d, i) => (
                       <div
                         key={i}
@@ -2417,29 +2404,17 @@ export function App() {
                       </div>
                     )}
                   </div>
-                  <div className="group-pager">
-                    <span>{data?.diagnostics.total || 0} 条诊断</span>
-                    <Button
-                      variant="ghost"
-                      size="sm"
-                      disabled={!diagnosticOffset}
-                      onClick={() =>
-                        setDiagnosticOffset(Math.max(0, diagnosticOffset - 50))
-                      }
-                    >
-                      上一组
-                    </Button>
-                    <Button
-                      variant="ghost"
-                      size="sm"
-                      disabled={
-                        !data || diagnosticOffset + 50 >= data.diagnostics.total
-                      }
-                      onClick={() => setDiagnosticOffset(diagnosticOffset + 50)}
-                    >
-                      下一组
-                    </Button>
-                  </div>
+                  <Pagination
+                    label="诊断"
+                    offset={data?.diagnostics.offset || 0}
+                    total={data?.diagnostics.total || 0}
+                    limit={50}
+                    loading={loading || !data}
+                    onPage={(offset) => {
+                      if (offset === diagnosticOffset) void refresh();
+                      else setDiagnosticOffset(offset);
+                    }}
+                  />
                 </>
               )}
               {screen === "settings" && draft && boot && (
@@ -2623,8 +2598,12 @@ export function App() {
               key={boot!.session_id}
               initiallyOpen
               runs={data?.runs || views.ai?.runs}
+              busy={loading}
               sessionId={boot!.session_id!}
-              onOffset={setRunOffset}
+              onOffset={(offset) => {
+                if (offset === runOffset) void refresh();
+                else setRunOffset(offset);
+              }}
               onError={setError}
             />
           )}

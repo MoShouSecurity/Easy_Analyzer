@@ -6,9 +6,10 @@ import {
   ExternalLink,
   LoaderCircle,
 } from "lucide-react";
-import { useState, useEffect } from "react";
+import { useState, useEffect, useRef } from "react";
 import { Button } from "./ui/button";
 import { api } from "../lib/api";
+import { Pagination } from "./Pagination";
 import { Tabs } from "./ui/tabs";
 import { basename, bytes } from "../lib/utils";
 import { logFieldLabel } from "../lib/field-labels";
@@ -67,19 +68,32 @@ export function Inspector({
   const [refs, setRefs] = useState(finding?.evidence_ids ?? []);
   const [refOffset, setRefOffset] = useState(0);
   const [refError, setRefError] = useState("");
+  const [refsLoading, setRefsLoading] = useState(false);
+  const refsRevision = useRef(0);
   useEffect(() => {
+    refsRevision.current++;
     setRefs(finding?.evidence_ids ?? []);
     setRefOffset(0);
     setRefError("");
-  }, [finding?.id]);
+    setRefsLoading(false);
+    return () => {
+      refsRevision.current++;
+    };
+  }, [finding?.id, finding?.evidence_ids, sessionId]);
   const loadRefs = async (offset: number) => {
     if (!finding || sessionId == null) return;
+    const revision = ++refsRevision.current;
+    setRefsLoading(true);
+    setRefError("");
     try {
       const page = await api.findingRefs(sessionId, finding.id, offset);
+      if (revision !== refsRevision.current) return;
       setRefs(page.items);
-      setRefOffset(offset);
+      setRefOffset(page.offset);
     } catch (e) {
-      setRefError(String(e));
+      if (revision === refsRevision.current) setRefError(String(e));
+    } finally {
+      if (revision === refsRevision.current) setRefsLoading(false);
     }
   };
   const [note, setNote] = useState(detail?.note ?? "");
@@ -144,30 +158,20 @@ export function Inspector({
             }
           />
           <div className="inspector-scroll">
+            {loading && finding?.table_preview && (
+              <p className="muted">正在读取发现详情…</p>
+            )}
             {finding &&
               (tab === "references" || tab === "explanation") &&
               (finding.evidence_count ?? 0) > 100 && (
-                <div className="project-actions">
-                  <Button
-                    variant="ghost"
-                    disabled={!refOffset}
-                    onClick={() => void loadRefs(Math.max(0, refOffset - 100))}
-                  >
-                    上一页引用
-                  </Button>
-                  <span>
-                    {refOffset + 1}–
-                    {Math.min(refOffset + 100, finding.evidence_count ?? 0)} /{" "}
-                    {finding.evidence_count}
-                  </span>
-                  <Button
-                    variant="ghost"
-                    disabled={refOffset + 100 >= (finding.evidence_count ?? 0)}
-                    onClick={() => void loadRefs(refOffset + 100)}
-                  >
-                    下一页引用
-                  </Button>
-                </div>
+                <Pagination
+                  label="证据引用"
+                  offset={refOffset}
+                  total={finding.evidence_count || 0}
+                  limit={100}
+                  loading={loading || refsLoading}
+                  onPage={(offset) => void loadRefs(offset)}
+                />
               )}
             {refError && <p role="alert">{refError}</p>}
 

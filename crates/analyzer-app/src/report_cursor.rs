@@ -244,11 +244,15 @@ impl AnalysisSession {
         crate::storage::page_limit(limit)?;
         if let Some(db) = &self.0.store {
             let c = db.lock()?;
-            let total = scalar(&c, "SELECT COUNT(*) FROM ai_runs")?;
+            let total = db.cached_count(&c, "SELECT COUNT(*) FROM ai_runs", &[])?;
             let headers: Vec<AiRun> = values(
                 &c,
-                "SELECT json FROM ai_runs ORDER BY ordinal DESC LIMIT ?1 OFFSET ?2",
-                params![limit as i64, offset.min(i64::MAX as usize) as i64],
+                "SELECT json FROM ai_runs WHERE ordinal<=?1 ORDER BY ordinal DESC LIMIT ?2",
+                params![
+                    db.page_boundary(&c, "ai_runs", "1=1", &[], "ordinal", true, total, offset)?
+                        .unwrap_or(i64::MIN),
+                    limit as i64
+                ],
             )?;
             Ok(Page {
                 offset,
@@ -289,18 +293,32 @@ impl AnalysisSession {
                 [run_index as i64],
                 |r| r.get(0),
             )?;
-            let total = c.query_row(
+            let total = db.cached_count(
+                &c,
                 "SELECT COUNT(*) FROM ai_batches WHERE run_id=?1",
-                [id],
-                |r| r.get::<_, i64>(0),
-            )? as usize;
+                &[id.into()],
+            )?;
             Ok(Page {
                 offset,
                 total,
                 items: values(
                     &c,
-                    "SELECT json FROM ai_batches WHERE run_id=?1 ORDER BY ordinal LIMIT ?2 OFFSET ?3",
-                    params![id, limit as i64, offset as i64],
+                    "SELECT json FROM ai_batches WHERE run_id=?1 AND ordinal>=?2 ORDER BY ordinal LIMIT ?3",
+                    params![
+                        id,
+                        db.page_boundary(
+                            &c,
+                            "ai_batches",
+                            "run_id=?",
+                            &[id.into()],
+                            "ordinal",
+                            false,
+                            total,
+                            offset
+                        )?
+                        .unwrap_or(i64::MAX),
+                        limit as i64
+                    ],
                 )?,
             })
         } else {
