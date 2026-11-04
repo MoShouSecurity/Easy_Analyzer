@@ -571,7 +571,7 @@ fi`,
     "查看启动服务配置",
     "列出常见 SysV、OpenRC 和 systemd 的启动配置路径，不执行脚本。",
     `FOUND_CONFIG=0
-for CONFIG_DIR in /etc/init.d /etc/rc*.d /etc/runlevels/* /etc/systemd/system /usr/lib/systemd/system /lib/systemd/system; do
+for CONFIG_DIR in /etc/init.d /etc/rc*.d /etc/runlevels/* /etc/systemd/system /etc/systemd/system/*.wants /etc/systemd/system/*.requires /usr/lib/systemd/system /lib/systemd/system; do
   if [ -d "$CONFIG_DIR" ]; then
     FOUND_CONFIG=1
     printf '\\n--- %s ---\\n' "$CONFIG_DIR"
@@ -580,17 +580,27 @@ for CONFIG_DIR in /etc/init.d /etc/rc*.d /etc/runlevels/* /etc/systemd/system /u
 done
 if [ "$FOUND_CONFIG" -eq 0 ]; then
   printf '%s\\n' '没有发现这些常见启动目录；请核查该系统实际使用的 init。'
+fi
+if command -v systemctl >/dev/null 2>&1 && [ -d /run/systemd/system ]; then
+  printf '\\n%s\\n' '--- systemd 已启用服务 ---'
+  if ! systemctl list-unit-files --type=service --state=enabled --no-pager; then
+    printf '%s\\n' '服务启用状态查询失败，请核查 systemd 状态、权限及前面的错误。'
+  fi
+  printf '\\n%s\\n' '--- systemd 定时器 ---'
+  if ! systemctl list-timers --all --no-pager; then
+    printf '%s\\n' '定时器查询失败，请核查 systemd 状态、权限及前面的错误。'
+  fi
 fi`,
-    "只需 ls 和 sh，不要求 systemctl；目录内容不等于已启用或正在运行的服务。不会覆盖所有 init 实现、用户级服务和持久化机制。",
+    "基础路径只需 ls/sh，并展开 systemd 的 wants/requires 目录。仅在 systemctl 存在且有 /run/systemd/system 时补查启用服务与定时器；目录内容不等于运行状态，也不覆盖用户级单元和全部持久化机制。",
     "普通用户；受限配置需要 root",
   ),
   linux(
     "startup-scripts",
     "persistence",
     "查看启动脚本与登录配置",
-    "读取 rc.local、系统 profile 及当前用户的常见 Shell 启动文件。",
+    "读取 rc.local、profile.d、环境配置及当前用户的常见 Shell 启动文件。",
     `FOUND_CONFIG=0
-for CONFIG_FILE in /etc/rc.local /etc/rc.d/rc.local /etc/profile /etc/bash.bashrc "\${HOME:-/root}/.profile" "\${HOME:-/root}/.bashrc"; do
+for CONFIG_FILE in /etc/rc.local /etc/rc.d/rc.local /etc/profile /etc/profile.d/* /etc/environment /etc/bash.bashrc "\${HOME:-/root}/.profile" "\${HOME:-/root}/.bash_profile" "\${HOME:-/root}/.bashrc"; do
   if [ -f "$CONFIG_FILE" ]; then
     FOUND_CONFIG=1
     printf '\\n--- %s ---\\n' "$CONFIG_FILE"
@@ -636,19 +646,24 @@ fi`,
     "persistence",
     "查看系统 cron 配置",
     "读取存在的系统 crontab/cron.d 文件，并列出周期脚本目录。",
-    `for CRON_FILE in /etc/crontab /etc/cron.d/*; do
+    `FOUND_CONFIG=0
+for CRON_FILE in /etc/crontab /etc/cron.d/*; do
   if [ -f "$CRON_FILE" ]; then
+    FOUND_CONFIG=1
     printf '\\n--- %s ---\\n' "$CRON_FILE"
     if [ -r "$CRON_FILE" ]; then cat "$CRON_FILE"; else printf '%s\\n' '文件不可读，请核查权限。'; fi
   fi
 done
 for CRON_DIR in /etc/cron.hourly /etc/cron.daily /etc/cron.weekly /etc/cron.monthly /etc/periodic/*; do
   if [ -d "$CRON_DIR" ]; then
+    FOUND_CONFIG=1
     printf '\\n--- %s ---\\n' "$CRON_DIR"
     ls -la "$CRON_DIR"
   fi
 done
-printf '%s\\n' '仅展示存在的配置路径；空输出不代表系统没有定时任务。'`,
+if [ "$FOUND_CONFIG" -eq 0 ]; then
+  printf '%s\\n' '未发现这些常见 cron 配置路径，不能据此排除系统存在定时任务。'
+fi`,
     "使用 sh 文件匹配、cat 和 ls；兼顾常见发行版与 Alpine/BusyBox 的 /etc/periodic，不使用 find -maxdepth/-exec，不运行周期脚本。",
     "普通用户；受限配置需要 root",
   ),
@@ -688,8 +703,12 @@ for LOG_FILE in /var/log/auth.log /var/log/secure /var/log/messages /var/log/sys
 done
 if [ "$FOUND_LOG" -eq 0 ]; then
   printf '%s\\n' '未发现常见认证文本日志；请核查 syslog/logread 配置及实际日志路径。'
+fi
+if command -v lastb >/dev/null 2>&1 && [ -r /var/log/btmp ]; then
+  printf '\\n%s\\n' '--- btmp 失败登录历史（lastb）---'
+  lastb | head -n 100
 fi`,
-    "只需 BusyBox grep/tail，不依赖 lastb，也不把二进制 btmp 当文本读取；这里只展示匹配模式的记录，其他认证方式、压缩/轮转日志需另查。",
+    "基础路径只需 BusyBox grep/tail；若 lastb 存在且 /var/log/btmp 可读，另补充前 100 行失败登录历史，不把二进制 btmp 当文本读取。文本匹配和日志留存均可能不完整，压缩/轮转日志需另查。",
     "root 或具有认证日志读取权限",
   ),
   linux(
@@ -806,7 +825,11 @@ if [ ! -f "$SOURCE_LOG" ] || [ ! -r "$SOURCE_LOG" ]; then
 elif mkdir -m 700 "$EVIDENCE_DIR"; then
   if cp -p "$SOURCE_LOG" "$EVIDENCE_DIR/"; then
     printf '日志已复制到 %s/\\n' "$EVIDENCE_DIR"
+  else
+    printf '%s\\n' '复制失败或属性未能完整保留；请核查前面的错误和目标文件，不要将其作为已完成的证据副本。'
   fi
+else
+  printf '%s\\n' '未能创建全新取证目录，已停止复制；请核查目录是否已存在及写入权限。'
 fi`,
     "使用 BusyBox mkdir/cp/date，不依赖 cp --no-clobber 或 sudo。mkdir 不带 -p，目录已存在时停止，因此不覆盖已有文件；cp -p 能否保留所有属性受权限影响，活动日志复制期间仍可能变化。",
     "源日志读取及目标目录写入权限；保留他人所有权通常需要 root",

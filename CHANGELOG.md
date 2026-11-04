@@ -2,6 +2,8 @@
 
 ## 未发布
 
+- 在 BusyBox 基础路径之外保留可选 systemd 启用服务/定时器和 lastb 查询，补齐 profile.d、environment、bash_profile 及 wants/requires 路径；复制失败给出明确提示，验证脚本参数替换必须恰好命中一次。
+
 - 应急响应命令的 Linux 示例优先使用 BusyBox 常见 applet 和 sh/ash 语法，移除 sudo、lsof、pstree、固定查询日期及 GNU 专有选项，补充无 ps/网络工具时的 procfs 回退、路径/工具缺失提示和可直接使用的示例参数。
 - Windows 账号、网络、DNS 和计划任务查询改用常见内置命令；命令搜索覆盖兼容说明、权限和 Shell。补充 BusyBox、裁剪 applet 与 Debian 精简容器的逐条合成验证及不覆盖证据检查。
 

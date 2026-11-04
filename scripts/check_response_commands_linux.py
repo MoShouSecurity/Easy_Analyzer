@@ -21,6 +21,12 @@ printf '%s\n' 'synthetic system event' > /var/log/messages
 printf '%s\n' '# synthetic, never executed' > /var/spool/cron/crontabs/root
 printf '%s\n' '# synthetic system cron' > /etc/crontab
 printf '%s\n' '# synthetic startup script' > /etc/rc.local
+mkdir -p /etc/profile.d /root /etc/systemd/system/fixture.target.wants
+printf '%s\n' '# PROFILE_D_FIXTURE' 'touch /tmp/profile-executed' > /etc/profile.d/response-fixture.sh
+printf '%s\n' '# ENVIRONMENT_FIXTURE' > /etc/environment
+printf '%s\n' '# BASH_PROFILE_FIXTURE' > /root/.bash_profile
+printf '%s\n' '# synthetic unit, never executed' > /etc/systemd/system/response-fixture.service
+ln -s /etc/systemd/system/response-fixture.service /etc/systemd/system/fixture.target.wants/response-fixture.service
 : > /var/log/wtmp
 printf '%s\n' 'KEEP EXISTING EVIDENCE' > /tmp/evidence-existing/auth.log
 if [ "$MODE" = minimal ]; then
@@ -53,6 +59,23 @@ for script in /commands/linux-*.sh; do
     FAILED=1
   fi
 done
+# Extra coverage is synthetic: the image is not booted with systemd as PID 1.
+/bin/sh /commands/linux-startup-scripts.sh > /tmp/startup-output
+for marker in PROFILE_D_FIXTURE ENVIRONMENT_FIXTURE BASH_PROFILE_FIXTURE; do
+  if ! grep -q "$marker" /tmp/startup-output; then
+    printf 'FAIL: missing startup configuration %s\n' "$marker"
+    FAILED=1
+  fi
+done
+if [ -e /tmp/profile-executed ]; then
+  printf '%s\n' 'FAIL: startup configuration was executed instead of read'
+  FAILED=1
+fi
+/bin/sh /commands/linux-system-cron.sh > /tmp/cron-output
+if grep -q '未发现这些常见 cron' /tmp/cron-output; then
+  printf '%s\n' 'FAIL: missing-cron warning appeared despite existing configuration'
+  FAILED=1
+fi
 # Verify copying cannot replace an already existing evidence directory/file.
 /bin/sh /commands/copy-existing.sh > /tmp/copy-output 2> /tmp/copy-error || true
 if ! grep -q 'KEEP EXISTING EVIDENCE' /tmp/evidence-existing/auth.log; then
@@ -63,6 +86,73 @@ fi
 /bin/sh /commands/copy-missing.sh > /tmp/copy-output 2> /tmp/copy-error || true
 if [ -d /tmp/missing-copy-output ] || ! grep -q 'SOURCE_LOG' /tmp/copy-output; then
   printf '%s\n' 'FAIL: missing source was not handled correctly'
+  FAILED=1
+fi
+# Force cp to fail, without changing the source or touching host data.
+/bin/mkdir -p /tmp/failing-bin /tmp/optional-bin
+/bin/cat > /tmp/failing-bin/cp <<'MOCK_CP'
+#!/bin/sh
+printf '%s\n' 'synthetic cp failure' >&2
+exit 1
+MOCK_CP
+/bin/chmod +x /tmp/failing-bin/cp
+PATH="/tmp/failing-bin:$PATH" /bin/sh /commands/copy-failure.sh > /tmp/copy-output 2> /tmp/copy-error || true
+if ! grep -q '复制失败' /tmp/copy-output || grep -q '日志已复制到' /tmp/copy-output; then
+  printf '%s\n' 'FAIL: copy failure lacked an explicit result'
+  FAILED=1
+fi
+# Optional systemctl and lastb are interface substitutes, not real service/log acceptance.
+/bin/cat > /tmp/optional-bin/systemctl <<'MOCK_SYSTEMCTL'
+#!/bin/sh
+printf '%s\n' "$*" >> /tmp/systemctl-calls
+if [ "${MOCK_SYSTEMCTL_FAIL:-0}" -eq 1 ]; then
+  printf '%s\n' 'synthetic systemctl failure' >&2
+  exit 1
+fi
+case "$1" in
+  list-unit-files) printf '%s\n' 'SYSTEMD_ENABLED_FIXTURE' ;;
+  list-timers) printf '%s\n' 'SYSTEMD_TIMER_FIXTURE' ;;
+  *) exit 2 ;;
+esac
+MOCK_SYSTEMCTL
+/bin/cat > /tmp/optional-bin/lastb <<'MOCK_LASTB'
+#!/bin/sh
+printf '%s\n' 'LASTB_FIXTURE'
+MOCK_LASTB
+/bin/chmod +x /tmp/optional-bin/systemctl /tmp/optional-bin/lastb
+# An available binary alone must not trigger systemd queries.
+PATH="/tmp/optional-bin:$PATH" /bin/sh /commands/linux-startup-services.sh > /tmp/service-output
+if [ -f /tmp/systemctl-calls ] || ! grep -q 'fixture.target.wants' /tmp/service-output; then
+  printf '%s\n' 'FAIL: systemd guard or nested enablement directory listing failed'
+  FAILED=1
+fi
+/bin/mkdir -p /run/systemd/system
+PATH="/tmp/optional-bin:$PATH" /bin/sh /commands/linux-startup-services.sh > /tmp/service-output
+if ! grep -q '^list-unit-files --type=service --state=enabled --no-pager$' /tmp/systemctl-calls ||
+   ! grep -q '^list-timers --all --no-pager$' /tmp/systemctl-calls ||
+   ! grep -q SYSTEMD_ENABLED_FIXTURE /tmp/service-output ||
+   ! grep -q SYSTEMD_TIMER_FIXTURE /tmp/service-output; then
+  printf '%s\n' 'FAIL: optional systemd query coverage was lost'
+  FAILED=1
+fi
+MOCK_SYSTEMCTL_FAIL=1 PATH="/tmp/optional-bin:$PATH" /bin/sh /commands/linux-startup-services.sh > /tmp/service-output 2> /tmp/service-error
+if ! grep -q '查询失败' /tmp/service-output || [ ! -s /tmp/service-error ]; then
+  printf '%s\n' 'FAIL: optional systemd failure was hidden'
+  FAILED=1
+fi
+# No btmp: skip lastb even when a decoder is available.
+/bin/rm -f /var/log/btmp
+PATH="/tmp/optional-bin:$PATH" /bin/sh /commands/linux-login-failure.sh > /tmp/auth-output
+if grep -q LASTB_FIXTURE /tmp/auth-output; then
+  printf '%s\n' 'FAIL: lastb was called without a readable btmp'
+  FAILED=1
+fi
+# Text logs absent: still consult an available lastb for readable btmp.
+/bin/rm /var/log/auth.log /var/log/messages
+: > /var/log/btmp
+PATH="/tmp/optional-bin:$PATH" /bin/sh /commands/linux-login-failure.sh > /tmp/auth-output
+if ! grep -q LASTB_FIXTURE /tmp/auth-output; then
+  printf '%s\n' 'FAIL: optional lastb evidence path was lost'
   FAILED=1
 fi
 # last must not try to open a missing wtmp file, even when the tool exists.
@@ -78,6 +168,16 @@ if [ "$COUNT" -ne 24 ]; then FAILED=1; fi
 printf 'Checked %s Linux commands (%s).\n' "$COUNT" "$MODE"
 exit "$FAILED"
 '''
+
+
+def replace_assignment(script, name, value):
+    """Fail closed when snippet edits invalidate a test's parameter override."""
+    changed, count = re.subn(
+        rf"^{re.escape(name)}=.*$", lambda _: f"{name}={value}", script, flags=re.M,
+    )
+    if count != 1:
+        raise ValueError(f"Expected exactly one {name} assignment, found {count}")
+    return changed
 
 
 def main():
@@ -101,15 +201,10 @@ def main():
         for command in commands:
             write(f'{command["id"]}.sh', command["command"] + "\n")
         copy = next(c["command"] for c in commands if c["id"] == "linux-copy-logs")
-        write("copy-existing.sh", re.sub(
-            r"^EVIDENCE_DIR=.*$", "EVIDENCE_DIR=/tmp/evidence-existing", copy, flags=re.M,
-        ))
-        copy_missing = re.sub(
-            r"^SOURCE_LOG=.*$", "SOURCE_LOG=/tmp/missing-source", copy, flags=re.M,
-        )
-        copy_missing = re.sub(
-            r"^EVIDENCE_DIR=.*$", "EVIDENCE_DIR=/tmp/missing-copy-output", copy_missing, flags=re.M,
-        )
+        write("copy-existing.sh", replace_assignment(copy, "EVIDENCE_DIR", "/tmp/evidence-existing"))
+        write("copy-failure.sh", replace_assignment(copy, "EVIDENCE_DIR", "/tmp/copy-failed"))
+        copy_missing = replace_assignment(copy, "SOURCE_LOG", "/tmp/missing-source")
+        copy_missing = replace_assignment(copy_missing, "EVIDENCE_DIR", "/tmp/missing-copy-output")
         write("copy-missing.sh", copy_missing)
         write("check.sh", HARNESS)
         environments = [

@@ -150,7 +150,6 @@ The project name defaults to the client organization; use `--name` to override i
 
 New configurations plan requests using the model context budget. Adjust the budget to the capabilities of your service and model. `config check` explicitly tests connectivity with a small request that contains no project evidence.
 
-
 ## IOC format
 
 TXT files contain one IP address, domain, or complete URL per line. CSV uses `type,value` columns with an optional `note` column:
