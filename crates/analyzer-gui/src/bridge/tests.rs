@@ -393,7 +393,7 @@ fn config_transport_redacts_keys_and_explicit_actions_preserve_or_clear() {
         api_key_env: String::new(),
         timeout_seconds: original.timeout_seconds,
         batch_bytes: original.batch_bytes,
-        aggregate_similar: original.aggregate_similar,
+        aggregate_similar: Some(original.aggregate_similar),
         context_tokens: original.context_tokens,
         max_output_tokens: original.max_output_tokens,
         response_format: original.response_format.clone(),
@@ -428,6 +428,29 @@ fn config_transport_redacts_keys_and_explicit_actions_preserve_or_clear() {
             .unwrap()
             .contains("sk-accidentally")
     );
+}
+
+#[test]
+fn config_transport_inherits_omitted_aggregation_and_honors_explicit_values() {
+    for previous_value in [false, true] {
+        let previous = core::ai::AiConfig {
+            aggregate_similar: previous_value,
+            ..Default::default()
+        };
+        for requested in [None, Some(false), Some(true)] {
+            let mut payload = serde_json::to_value(PublicConfig::from(&previous)).unwrap();
+            if let Some(value) = requested {
+                payload["aggregate_similar"] = serde_json::json!(value);
+            } else {
+                payload.as_object_mut().unwrap().remove("aggregate_similar");
+            }
+            let input: ConfigInput = serde_json::from_value(payload).unwrap();
+            assert_eq!(
+                input.apply(&previous).unwrap().aggregate_similar,
+                requested.unwrap_or(previous_value)
+            );
+        }
+    }
 }
 
 #[test]

@@ -176,14 +176,14 @@ fn prepare(
     };
     let mut emit = |item: TextEvidence| -> Result<()> {
         ctx.check()?;
-        let tokens = estimated_tokens(&item.text, ctx)?.saturating_add(1);
+        let tokens = item.tokens;
         let weight = if capacity.is_some() {
             tokens
         } else {
             item.text.len().saturating_add(1)
         };
         if weight > limit {
-            bail!("AI 单条证据超过发送预算；证据不会被截断");
+            bail!("AI 单条证据 {} 超过发送预算；证据不会被截断", item.id);
         }
         // A compressed batch must also bound its local reference mapping.
         if used.saturating_add(weight) > limit || batch_records + item.members.len() > 8192 {
@@ -217,11 +217,12 @@ fn prepare(
             );
         }
         if config.aggregate_similar {
-            aggregator.push(record, text, ctx, &mut emit)?;
+            aggregator.push(record, text, tokens, ctx, &mut emit)?;
         } else {
             emit(TextEvidence {
                 id: record.id.clone(),
                 text,
+                tokens,
                 members: vec![record.id.clone()],
             })?;
         }

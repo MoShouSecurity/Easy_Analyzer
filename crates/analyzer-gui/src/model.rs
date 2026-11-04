@@ -262,7 +262,7 @@ pub struct ConfigInput {
     pub timeout_seconds: u64,
     pub batch_bytes: usize,
     #[serde(default)]
-    pub aggregate_similar: bool,
+    pub aggregate_similar: Option<bool>,
     #[serde(default)]
     pub context_tokens: Option<usize>,
     pub max_output_tokens: u32,
@@ -300,7 +300,7 @@ impl ConfigInput {
             },
             timeout_seconds: self.timeout_seconds,
             batch_bytes: self.batch_bytes,
-            aggregate_similar: self.aggregate_similar,
+            aggregate_similar: self.aggregate_similar.unwrap_or(previous.aggregate_similar),
             context_tokens: self.context_tokens,
             max_output_tokens: self.max_output_tokens,
             response_format: self.response_format,

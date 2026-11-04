@@ -206,6 +206,8 @@ pub fn evidence_value(record: &Record, include_payload: bool) -> Value {
 struct TextEvidence {
     id: String,
     text: String,
+    /// Cached once at planning time; local spool metadata, never sent to the API.
+    tokens: usize,
     /// Original evidence IDs; only the representative ID is transmitted.
     members: Vec<String>,
 }
@@ -549,6 +551,9 @@ pub fn analyze_prepared_with_context(
     }
     for batch in &mut run.batch_results {
         references.expand(&mut batch.evidence_ids);
+    }
+    for clue in &mut neutral_preview {
+        references.expand(&mut clue.evidence_ids);
     }
     let cancelled = ctx.cancellation.is_cancelled();
     if cancelled {
@@ -1165,6 +1170,68 @@ mod tests {
         }
         assert_eq!(batches(&[&r1, &r2], false, 2000).unwrap().len(), 2);
     }
+    #[test]
+    fn partial_failure_expands_grouped_neutral_references_in_local_recap() {
+        let source = source_for("synthetic-auth.log", "text", b"synthetic");
+        let records: Vec<_> = (0..13)
+            .map(|i| {
+                let user = if i < 12 { "root" } else { "admin" };
+                make_record(
+                    &source,
+                    format!("line:{}", i + 1),
+                    Some("2026-11-04T10:00:01Z".into()),
+                    format!("2026-11-04T10:00:01Z host sshd[42]: Failed password for {user} from 192.0.2.10 port 1234 {}", "x".repeat(300)),
+                    ParseStatus::Parsed,
+                    RecordData::Log(LogData { category: "auth_text".into(), ..Default::default() }),
+                )
+            })
+            .collect();
+        let content = json!({
+            "findings": [],
+            "context": [{
+                "severity": "info", "title": "待关联的登录记录",
+                "description": "仅保留已提供的登录事实，不判断是否异常。",
+                "evidence_ids": [records[0].id], "confidence": 0.5,
+                "recommendations": []
+            }]
+        });
+        // This server accepts exactly one request. The next batch fails to
+        // connect, exercising a real partial-result path without an external API.
+        let body = json!({"choices": [{"message": {"content": content.to_string()}}]}).to_string();
+        let (url, server) = mock("200 OK", body, Duration::ZERO);
+        let mut config = AiConfig {
+            base_url: url,
+            model: "mock".into(),
+            context_tokens: None,
+            ..Default::default()
+        };
+        let ctx = ExecutionContext::default();
+        let refs: Vec<_> = records.iter().collect();
+        let preview = prepare_with_context(&refs, &config, false, &ctx).unwrap();
+        assert_eq!(preview.plan.transmitted_records, 2);
+        config.batch_bytes = preview.batches[0]
+            .iter()
+            .map(|item| item.text.len() + 1)
+            .max()
+            .unwrap();
+        let prepared = prepare_with_context(&refs, &config, false, &ctx).unwrap();
+        assert_eq!(prepared.plan.evidence_batches, 2);
+        let result = analyze_prepared_with_context(prepared, &ctx, |_, _, _| {}).unwrap();
+        server.join().unwrap();
+        assert!(!result.cancelled);
+        assert!(result.analysis.error.is_some());
+        assert_eq!(result.analysis.run.completed(), 1);
+        assert_eq!(result.analysis.run.analyzed_records, 12);
+        assert!(result.analysis.findings.is_empty());
+        let recap = result.analysis.local_summary.unwrap();
+        assert!(recap.contains("中性线索：待关联的登录记录"));
+        for record in records.iter().take(5) {
+            assert!(recap.contains(&record.id));
+        }
+        assert!(recap.contains("另 7 个引用"));
+        assert!(!recap.contains(&records[12].id));
+    }
+
     #[test]
     fn local_recap_preserves_neutral_facts_without_creating_findings() {
         let coverage = EvidenceCoverage {

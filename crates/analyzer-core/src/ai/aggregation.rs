@@ -19,19 +19,20 @@ struct Group {
     unknown_times: usize,
 }
 impl Group {
-    fn new(record: &Record, text: String) -> Self {
+    fn new(record: &Record, text: String, tokens: usize) -> Self {
         let mut group = Self {
             items: Vec::new(),
             times: BTreeMap::new(),
             unknown_times: 0,
         };
-        group.add(record, text);
+        group.add(record, text, tokens);
         group
     }
-    fn add(&mut self, record: &Record, text: String) {
+    fn add(&mut self, record: &Record, text: String, tokens: usize) {
         self.items.push(TextEvidence {
             id: record.id.clone(),
             text,
+            tokens,
             members: vec![record.id.clone()],
         });
         if let Some((_, second)) = time(record) {
@@ -63,28 +64,29 @@ impl Group {
             self.unknown_times,
             representative.text,
         );
-        let weight = |text: &str| -> Result<usize> {
-            Ok(if tokens {
-                super::planning::estimated_tokens(text, ctx)? + 1
-            } else {
-                text.len() + 1
-            })
+        // Reuse the original estimates computed during planning in both modes.
+        // Byte mode still requires token savings: fewer UTF-8 bytes alone need
+        // not mean fewer tokens (the wrapper may contain more non-ASCII text).
+        let grouped_tokens = super::planning::estimated_tokens(&text, ctx)?.saturating_add(1);
+        let original_tokens: usize = self.items.iter().map(|item| item.tokens).sum();
+        let grouped = if tokens {
+            grouped_tokens
+        } else {
+            text.len() + 1
         };
-        let grouped = weight(&text)?;
-        let original = self.items.iter().try_fold(0usize, |sum, item| {
-            Ok::<_, anyhow::Error>(sum + weight(&item.text)?)
-        })?;
+        let original = if tokens {
+            original_tokens
+        } else {
+            self.items.iter().map(|item| item.text.len() + 1).sum()
+        };
         // Small groups or long histograms may cost more: send originals in that case.
-        let grouped_tokens = super::planning::estimated_tokens(&text, ctx)?;
-        let original_tokens = self.items.iter().try_fold(0usize, |sum, item| {
-            Ok::<_, anyhow::Error>(sum + super::planning::estimated_tokens(&item.text, ctx)? + 1)
-        })?;
-        if grouped > limit || grouped >= original || grouped_tokens + 1 >= original_tokens {
+        if grouped > limit || grouped >= original || grouped_tokens >= original_tokens {
             return Ok(self.items);
         }
         Ok(vec![TextEvidence {
             id: representative.id.clone(),
             text,
+            tokens: grouped_tokens,
             members: self.items.iter().map(|item| item.id.clone()).collect(),
         }])
     }
@@ -219,6 +221,7 @@ impl Aggregator {
         &mut self,
         record: &Record,
         text: String,
+        tokens: usize,
         ctx: &ExecutionContext,
         emit: &mut impl FnMut(TextEvidence) -> Result<()>,
     ) -> Result<()> {
@@ -230,12 +233,12 @@ impl Aggregator {
         self.bytes = self.bytes.saturating_add(text.len());
         let key = fingerprint(record)?;
         if let Some(index) = key.as_ref().and_then(|key| self.index.get(key)).copied() {
-            self.groups[index].add(record, text);
+            self.groups[index].add(record, text, tokens);
         } else {
             if let Some(key) = key {
                 self.index.insert(key, self.groups.len());
             }
-            self.groups.push(Group::new(record, text));
+            self.groups.push(Group::new(record, text, tokens));
         }
         Ok(())
     }
@@ -361,6 +364,37 @@ mod tests {
         assert_eq!(disk[0].text, batch[0].text);
         assert_eq!(disk[0].members, batch[0].members);
         assert_eq!(streamed.plan.evidence_tokens, prepared.plan.evidence_tokens);
+        // Byte mode uses the same cached estimates and grouping when its byte
+        // budget is sufficient, including after serializing to the local spool.
+        let refs: Vec<_> = report.records.iter().collect();
+        let config = AiConfig {
+            context_tokens: None,
+            batch_bytes: 10_000,
+            ..Default::default()
+        };
+        let legacy = prepare_stream_with_context(
+            &config,
+            false,
+            system_prompt(&refs, false),
+            refs.len(),
+            &ExecutionContext::default(),
+            |visit| {
+                for record in &report.records {
+                    visit(record)?;
+                }
+                Ok(())
+            },
+        )
+        .unwrap();
+        assert_eq!(
+            legacy.plan.transmitted_records,
+            prepared.plan.transmitted_records
+        );
+        assert_eq!(legacy.plan.evidence_tokens, prepared.plan.evidence_tokens);
+        assert_eq!(
+            legacy.plan.original_evidence_tokens,
+            prepared.plan.original_evidence_tokens
+        );
     }
     #[test]
     fn key_retains_security_fields_source_status_and_raw_unparsed_content() {
