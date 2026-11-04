@@ -449,7 +449,7 @@ it("returns IOC hits to the last valid page after a rescan reduces their total",
   scroll.scrollTop = 500;
   fireEvent.click(screen.getByRole("button", { name: "IOC 命中 末页" }));
   await screen.findByRole("button", { name: "hit-224" });
-  expect(scroll.scrollTop).toBe(0);
+  await waitFor(() => expect(scroll.scrollTop).toBe(0));
   total = 125;
   rerender(<IocView {...props} revision={2} />);
   await screen.findByRole("button", { name: "hit-124" });
@@ -536,7 +536,7 @@ it("retries failed IOC pages and ignores a response superseded by a refresh", as
   ).toBeDisabled();
   rerender(<IocView {...props} revision={2} />);
   await screen.findByLabelText("说明 item-100-fresh.test");
-  expect(scroll.scrollTop).toBe(0);
+  await waitFor(() => expect(scroll.scrollTop).toBe(0));
   await act(async () => finishStale(makeView(100, "-stale")));
   expect(
     screen.queryByLabelText("说明 item-100-stale.test"),
