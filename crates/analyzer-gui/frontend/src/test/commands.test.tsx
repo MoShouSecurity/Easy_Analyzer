@@ -36,7 +36,7 @@ describe("offline response commands", () => {
         expect(item.permission.trim()).not.toBe("");
         expect(item.notes.trim()).not.toBe("");
         expect(item.shell).toMatch(
-          platform === "windows" ? /^(PowerShell|CMD)$/ : /^Bash$/,
+          platform === "windows" ? /^(PowerShell|CMD)$/ : /^sh$/,
         );
       }
     }
@@ -74,7 +74,7 @@ describe("offline response commands", () => {
     await user.click(screen.getByRole("option", { name: "网络排查" }));
     expect(screen.getByText("4 条命令")).toBeVisible();
     fireEvent.change(screen.getByLabelText("搜索应急响应命令"), {
-      target: { value: "get-nettcpconnection" },
+      target: { value: "netstat -ano -p tcp" },
     });
     expect(screen.getByText("1 条命令")).toBeVisible();
     expect(
@@ -159,4 +159,38 @@ describe("offline response commands", () => {
     );
     expect(screen.getByRole("heading", { name: "查看系统版本" })).toBeVisible();
   });
+});
+
+it("shows the BusyBox baseline and searches compatibility notes", () => {
+  render(<CommandsView />);
+  fireEvent.mouseDown(screen.getByRole("tab", { name: "Linux" }), {
+    button: 0,
+    ctrlKey: false,
+  });
+  expect(
+    screen.getByText(/优先使用 BusyBox 常见命令，兼容 sh \/ ash/),
+  ).toBeVisible();
+  fireEvent.change(screen.getByLabelText("搜索应急响应命令"), {
+    target: { value: "HIDEPID" },
+  });
+  expect(screen.getByText("1 条命令")).toBeVisible();
+  expect(screen.getByRole("heading", { name: "查看进程父 PID" })).toBeVisible();
+});
+
+it("copies BusyBox-compatible shell text with literal NUL escapes and parameters", async () => {
+  render(<CommandsView />);
+  fireEvent.mouseDown(screen.getByRole("tab", { name: "Linux" }), {
+    button: 0,
+    ctrlKey: false,
+  });
+  const command = responseCommands.find(
+    (item) => item.id === "linux-process-command",
+  )!;
+  fireEvent.click(
+    screen.getByRole("button", { name: `复制 ${command.title}` }),
+  );
+  await screen.findByText("已复制完整命令");
+  expect(clipboard.writeText).toHaveBeenCalledExactlyOnceWith(command.command);
+  expect(command.command).toContain("PROCESS_ID=$$");
+  expect(command.command).toContain("tr '\\000' ' '");
 });
