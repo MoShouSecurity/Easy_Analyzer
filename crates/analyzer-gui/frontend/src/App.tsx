@@ -2217,6 +2217,32 @@ export function App() {
                         {currentAiPreview ? (
                           <>
                             <strong>发送预览</strong>
+                            {currentAiPreview.plan.aggregation_enabled && (
+                              <span>
+                                聚合：
+                                {number(
+                                  currentAiPreview.plan.selected_records,
+                                )}{" "}
+                                条 →{" "}
+                                {number(
+                                  currentAiPreview.plan.transmitted_records,
+                                )}{" "}
+                                项，其中{" "}
+                                {number(
+                                  currentAiPreview.plan.aggregated_groups,
+                                )}{" "}
+                                个聚合组；证据预计减少{" "}
+                                {number(
+                                  Math.max(
+                                    0,
+                                    currentAiPreview.plan
+                                      .original_evidence_tokens -
+                                      currentAiPreview.plan.evidence_tokens,
+                                  ),
+                                )}{" "}
+                                token（不含提示词）
+                              </span>
+                            )}
                             <details className="ai-budget-details">
                               <summary>预算详情</summary>
                               <div>
@@ -2242,7 +2268,9 @@ export function App() {
                             </details>
                             <span>
                               {currentAiPreview.plan.evidence_batches === 1
-                                ? "单次完整发送"
+                                ? currentAiPreview.plan.aggregated_groups > 0
+                                  ? "聚合后单次发送"
+                                  : "单次完整发送"
                                 : `分为 ${number(currentAiPreview.plan.evidence_batches)} 个证据批次`}
                               {currentAiPreview.plan.summary_planned
                                 ? "，完成后跨批汇总（按需要分轮）"

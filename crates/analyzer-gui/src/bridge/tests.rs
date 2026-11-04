@@ -393,6 +393,7 @@ fn config_transport_redacts_keys_and_explicit_actions_preserve_or_clear() {
         api_key_env: String::new(),
         timeout_seconds: original.timeout_seconds,
         batch_bytes: original.batch_bytes,
+        aggregate_similar: original.aggregate_similar,
         context_tokens: original.context_tokens,
         max_output_tokens: original.max_output_tokens,
         response_format: original.response_format.clone(),

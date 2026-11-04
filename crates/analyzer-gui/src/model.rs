@@ -223,6 +223,7 @@ pub struct PublicConfig {
     pub api_key_env: String,
     pub timeout_seconds: u64,
     pub batch_bytes: usize,
+    pub aggregate_similar: bool,
     pub context_tokens: Option<usize>,
     pub max_output_tokens: u32,
     pub response_format: String,
@@ -245,6 +246,7 @@ impl From<&core::ai::AiConfig> for PublicConfig {
             },
             timeout_seconds: c.timeout_seconds,
             batch_bytes: c.batch_bytes,
+            aggregate_similar: c.aggregate_similar,
             context_tokens: c.context_tokens,
             max_output_tokens: c.max_output_tokens,
             response_format: c.response_format.clone(),
@@ -259,6 +261,8 @@ pub struct ConfigInput {
     pub api_key_env: String,
     pub timeout_seconds: u64,
     pub batch_bytes: usize,
+    #[serde(default)]
+    pub aggregate_similar: bool,
     #[serde(default)]
     pub context_tokens: Option<usize>,
     pub max_output_tokens: u32,
@@ -296,6 +300,7 @@ impl ConfigInput {
             },
             timeout_seconds: self.timeout_seconds,
             batch_bytes: self.batch_bytes,
+            aggregate_similar: self.aggregate_similar,
             context_tokens: self.context_tokens,
             max_output_tokens: self.max_output_tokens,
             response_format: self.response_format,

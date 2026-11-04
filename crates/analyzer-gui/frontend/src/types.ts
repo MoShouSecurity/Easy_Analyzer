@@ -27,6 +27,7 @@ export interface PublicConfig {
   api_key_env: string;
   timeout_seconds: number;
   batch_bytes: number;
+  aggregate_similar: boolean;
   context_tokens: number | null;
   max_output_tokens: number;
   response_format: string;
@@ -376,6 +377,10 @@ export interface AiPreview {
   session_id: number;
   plan: {
     selected_records: number;
+    aggregation_enabled: boolean;
+    transmitted_records: number;
+    aggregated_groups: number;
+    original_evidence_tokens: number;
     evidence_tokens: number;
     prompt_tokens: number;
     input_budget_tokens: number | null;

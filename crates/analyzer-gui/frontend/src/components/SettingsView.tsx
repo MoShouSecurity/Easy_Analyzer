@@ -8,6 +8,7 @@ import {
 } from "lucide-react";
 import { Button } from "./ui/button";
 import { Select } from "./ui/select";
+import { Checkbox } from "./ui/checkbox";
 import type { ConfigInput, PublicConfig } from "../types";
 export function SettingsView({
   config,
@@ -151,6 +152,18 @@ export function SettingsView({
         </div>
         <div className="form-section">
           <h3>发送规划</h3>
+          <Checkbox
+            label="聚合相似日志"
+            checked={draft.aggregate_similar}
+            disabled={busy}
+            onChange={(checked) =>
+              onChange({ ...draft, aggregate_similar: checked })
+            }
+          />
+          <p>
+            同一来源、同一分钟内模板及关键字段相同的日志合并发送，保留代表记录、次数和每秒分布。
+            IP、账号、请求、命令与结果的差异分别保留；原始证据不变。关闭后逐条发送。
+          </p>
           <label className="form-field">
             规划方式
             <Select

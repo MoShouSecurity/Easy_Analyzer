@@ -12,6 +12,7 @@ use std::{
     time::Duration,
 };
 
+mod aggregation;
 mod planning;
 mod text;
 pub use planning::{AiPlan, PreparedAi, prepare_stream_with_context, prepare_with_context};
@@ -29,6 +30,8 @@ pub struct AiConfig {
     pub timeout_seconds: u64,
     /// UTF-8 byte budget for each evidence text batch, excluding prompts and transport encoding.
     pub batch_bytes: usize,
+    /// Aggregate equivalent log templates within bounded windows before AI batching.
+    pub aggregate_similar: bool,
     /// None preserves legacy byte batching. Some enables context-based planning
     /// and cross-batch synthesis; this is the actual API's shared token limit.
     #[serde(default)]
@@ -48,6 +51,7 @@ impl Default for AiConfig {
             api_key_env: String::new(),
             timeout_seconds: 300,
             batch_bytes: 98_304,
+            aggregate_similar: true,
             context_tokens: Some(1_000_000),
             max_output_tokens: 65_536,
             response_format: "json_object".into(),
@@ -64,6 +68,7 @@ impl std::fmt::Debug for AiConfig {
             .field("api_key_env", &"[redacted]")
             .field("timeout_seconds", &self.timeout_seconds)
             .field("batch_bytes", &self.batch_bytes)
+            .field("aggregate_similar", &self.aggregate_similar)
             .field("context_tokens", &self.context_tokens)
             .field("max_output_tokens", &self.max_output_tokens)
             .field("response_format", &self.response_format)
@@ -201,6 +206,8 @@ pub fn evidence_value(record: &Record, include_payload: bool) -> Value {
 struct TextEvidence {
     id: String,
     text: String,
+    /// Original evidence IDs; only the representative ID is transmitted.
+    members: Vec<String>,
 }
 
 #[cfg(test)]
@@ -213,6 +220,7 @@ fn batches(
         records,
         &AiConfig {
             batch_bytes: limit,
+            aggregate_similar: false,
             context_tokens: None,
             ..Default::default()
         },
@@ -423,6 +431,7 @@ pub fn analyze_prepared_with_context(
         batch_results: vec![],
     };
     let mut findings = vec![];
+    let mut references = aggregation::References::default();
     let mut seen = HashSet::new();
     let mut clues = vec![];
     let mut failures = vec![];
@@ -439,7 +448,7 @@ pub fn analyze_prepared_with_context(
             std::mem::take(batches.get_mut(i).context("AI 批次计划不一致")?)
         };
         let user = format!(
-            "当前批次 batch: {}\n总证据批次 total_batches: {}\n当前批次记录数: {}\n包含网络原始包及载荷: {}\n\n{}",
+            "当前批次 batch: {}\n总证据批次 total_batches: {}\n当前批次发送项数: {}\n包含网络原始包及载荷: {}\n\n{}",
             i + 1,
             count,
             batch.len(),
@@ -451,7 +460,7 @@ pub fn analyze_prepared_with_context(
                 .join("\n")
         );
         let ids = batch.iter().map(|r| r.id.clone()).collect();
-        let (batch_result, accepted) = send_batch(
+        let (mut batch_result, accepted) = send_batch(
             &client,
             &config,
             key.as_deref(),
@@ -481,10 +490,16 @@ pub fn analyze_prepared_with_context(
                 error
             ));
         }
+        // Persist original IDs even when a grouped request fails or is cancelled.
+        batch_result.evidence_ids = batch
+            .iter()
+            .flat_map(|r| r.members.iter().cloned())
+            .collect();
         run.batch_results.push(batch_result);
         let Some(parsed) = accepted else { continue };
+        references.retain(&batch, &parsed);
         run.completed_batches = Some(run.completed() + 1);
-        run.analyzed_records += batch.len();
+        run.analyzed_records += batch.iter().map(|r| r.members.len()).sum::<usize>();
         neutral_count += parsed.context.len();
         neutral_preview.extend(
             parsed
@@ -526,6 +541,14 @@ pub fn analyze_prepared_with_context(
                 "跨批汇总未完成：{error:#}；证据批次有效结果与原始回复保留。"
             ));
         }
+    }
+    // Resolve accepted group references after synthesis, including on cancellation.
+    // This finalization preserves valid results rather than abandoning them on cancel.
+    for finding in &mut findings {
+        references.expand(&mut finding.evidence_ids);
+    }
+    for batch in &mut run.batch_results {
+        references.expand(&mut batch.evidence_ids);
     }
     let cancelled = ctx.cancellation.is_cancelled();
     if cancelled {

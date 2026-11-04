@@ -56,6 +56,7 @@ const boot: Bootstrap = {
     base_url: "http://127.0.0.1:9999",
     model: "synthetic-model",
     api_key_configured: true,
+    aggregate_similar: true,
     api_key_env: "",
     timeout_seconds: 10,
     batch_bytes: 8192,
@@ -159,6 +160,10 @@ beforeEach(() => {
         session_id: 7,
         plan: {
           selected_records: 3,
+          aggregation_enabled: true,
+          transmitted_records: 3,
+          aggregated_groups: 0,
+          original_evidence_tokens: 300,
           evidence_tokens: 300,
           prompt_tokens: 100,
           input_budget_tokens: null,
@@ -678,6 +683,10 @@ it("ignores stale previews and only sends the latest explicitly selected payload
     session_id: 7,
     plan: {
       selected_records: 3,
+      aggregation_enabled: true,
+      transmitted_records: 3,
+      aggregated_groups: 0,
+      original_evidence_tokens: 400,
       evidence_tokens: 400,
       prompt_tokens: 100,
       input_budget_tokens: 700000,
@@ -1651,4 +1660,60 @@ it("keeps parsed log summaries visible when list fields are compacted", async ()
   expect(
     await screen.findByText("账号=合成用户 · 来源=192.0.2.10"),
   ).toBeVisible();
+});
+
+it("previews aggregation counts and savings without sending evidence", async () => {
+  const original = mock.invoke.getMockImplementation()!;
+  mock.invoke.mockImplementation(async (command, args) => {
+    const value = await original(command, args);
+    if (command === "prepare_ai") {
+      return {
+        ...value,
+        plan: {
+          ...value.plan,
+          selected_records: 120,
+          transmitted_records: 2,
+          aggregated_groups: 2,
+          original_evidence_tokens: 30000,
+          evidence_tokens: 4000,
+        },
+      };
+    }
+    return value;
+  });
+  render(<App />);
+  await waitFor(() => expect(mock.window.onCloseRequested).toHaveBeenCalled());
+  fireEvent.click(screen.getAllByRole("button", { name: "AI 分析" })[1]);
+  await screen.findByText(/聚合：120 条 → 2 项，其中 2 个聚合组/);
+  expect(screen.getByText(/26,000 token（不含提示词）/)).toBeInTheDocument();
+  expect(screen.getByText("聚合后单次发送 · 字节兼容模式")).toBeInTheDocument();
+  expect(
+    mock.invoke.mock.calls.some(([command]) => command === "start_ai"),
+  ).toBe(false);
+});
+
+it("allows disabling similar-log aggregation in settings", () => {
+  const onChange = vi.fn();
+  render(
+    <SettingsView
+      config={boot.config}
+      draft={{ ...boot.config, key_action: "keep", key_value: "" }}
+      onChange={onChange}
+      path="/tmp/gui.toml"
+      onPath={() => {}}
+      busy={false}
+      checkStatus="尚未检查"
+      onPick={() => {}}
+      onApply={() => {}}
+      onSave={() => {}}
+      onLoad={() => {}}
+      onCheck={() => {}}
+    />,
+  );
+  const checkbox = screen.getByRole("checkbox", { name: "聚合相似日志" });
+  expect(checkbox).toBeChecked();
+  fireEvent.click(checkbox);
+  expect(onChange).toHaveBeenCalledWith(
+    expect.objectContaining({ aggregate_similar: false }),
+  );
 });

@@ -27,6 +27,10 @@ pub(super) fn input_budget(context: usize, output: u32) -> Result<usize> {
 #[derive(Clone, Debug, Serialize)]
 pub struct AiPlan {
     pub selected_records: usize,
+    pub aggregation_enabled: bool,
+    pub transmitted_records: usize,
+    pub aggregated_groups: usize,
+    pub original_evidence_tokens: usize,
     pub evidence_tokens: usize,
     pub prompt_tokens: usize,
     pub input_budget_tokens: Option<usize>,
@@ -57,80 +61,20 @@ pub fn prepare_with_context(
     include_payload: bool,
     ctx: &ExecutionContext,
 ) -> Result<PreparedAi> {
-    ctx.check()?;
-    config.validate()?;
-    if records.is_empty() {
-        bail!("no evidence selected for AI analysis");
-    }
-    let mut system = system_prompt(records, include_payload);
-    let context = config.context_tokens;
-    if context.is_some() {
-        system.push_str("\n如果需要分批，请在 context 数组中保留用于跨批关联的少量中性事实（成功登录、相同账号/IP/主机/时间线等），使用与 findings 相同的字段结构，severity 为 info；只引用当前批次提供的证据编号。context 不是已确认异常。没有线索时返回空数组。\n");
-    }
-    // Include message headers, response schema and possible retry instructions.
-    let prompt_tokens = estimated_tokens(&system, ctx)?.saturating_add(2048);
-    let input_budget_tokens = context
-        .map(|n| input_budget(n, config.max_output_tokens))
-        .transpose()?;
-    let capacity = input_budget_tokens
-        .map(|budget| {
-            budget
-                .checked_sub(prompt_tokens)
-                .filter(|n| *n >= 256)
-                .context("提示词占用已超过输入预算，请增加上下文预算或减小输出上限")
-        })
-        .transpose()?;
-    let mut batches = Vec::new();
-    let mut batch = Vec::new();
-    let mut used = 0usize;
-    let mut evidence_tokens = 0usize;
-    for (i, record) in records.iter().enumerate() {
-        ctx.tick(Stage::AiPreparing, None, i, Some(records.len()))?;
-        let text = evidence_text(record, include_payload);
-        let tokens = estimated_tokens(&text, ctx)?.saturating_add(1);
-        evidence_tokens = evidence_tokens.saturating_add(tokens);
-        let weight = if capacity.is_some() {
-            tokens
-        } else {
-            text.len().saturating_add(1)
-        };
-        let limit = capacity.unwrap_or(config.batch_bytes);
-        if weight > limit {
-            bail!(
-                "AI 单条证据 {} 超过发送预算；请增加模型上下文/字节预算或缩小载荷，证据不会被截断",
-                record.position
-            );
-        }
-        if used.saturating_add(weight) > limit && !batch.is_empty() {
-            batches.push(std::mem::take(&mut batch));
-            used = 0;
-        }
-        used = used.saturating_add(weight);
-        batch.push(TextEvidence {
-            id: record.id.clone(),
-            text,
-        });
-    }
-    if !batch.is_empty() {
-        batches.push(batch);
-    }
-    let plan = AiPlan {
-        selected_records: records.len(),
-        evidence_tokens,
-        prompt_tokens,
-        input_budget_tokens,
-        context_tokens: context,
-        evidence_batches: batches.len(),
-        summary_planned: context.is_some() && batches.len() > 1,
-    };
-    Ok(PreparedAi {
-        config: config.clone(),
-        system,
-        batches,
-        spool: None,
-        plan,
+    prepare(
+        config,
         include_payload,
-    })
+        system_prompt(records, include_payload),
+        records.len(),
+        false,
+        ctx,
+        |visit| {
+            for record in records {
+                visit(record)?;
+            }
+            Ok(())
+        },
+    )
 }
 
 pub(super) fn summary_system() -> &'static str {
@@ -154,8 +98,21 @@ impl EvidenceSpool {
 pub fn prepare_stream_with_context(
     config: &AiConfig,
     include_payload: bool,
+    system: String,
+    total: usize,
+    ctx: &ExecutionContext,
+    visit: impl FnOnce(&mut dyn FnMut(&Record) -> Result<()>) -> Result<()>,
+) -> Result<PreparedAi> {
+    prepare(config, include_payload, system, total, true, ctx, visit)
+}
+
+#[allow(clippy::too_many_arguments)]
+fn prepare(
+    config: &AiConfig,
+    include_payload: bool,
     mut system: String,
     total: usize,
+    streamed: bool,
     ctx: &ExecutionContext,
     visit: impl FnOnce(&mut dyn FnMut(&Record) -> Result<()>) -> Result<()>,
 ) -> Result<PreparedAi> {
@@ -163,7 +120,10 @@ pub fn prepare_stream_with_context(
     ctx.check()?;
     config.validate()?;
     if total == 0 {
-        anyhow::bail!("no evidence selected for AI analysis");
+        bail!("no evidence selected for AI analysis");
+    }
+    if config.aggregate_similar {
+        system.push_str(super::aggregation::INSTRUCTIONS);
     }
     if config.context_tokens.is_some() {
         system.push_str("\n如果需要分批，请在 context 数组中保留用于跨批关联的少量中性事实（成功登录、相同账号/IP/主机/时间线等），使用与 findings 相同的字段结构，severity 为 info；只引用当前批次提供的证据编号。context 不是已确认异常。没有线索时返回空数组。\n");
@@ -181,70 +141,118 @@ pub fn prepare_stream_with_context(
                 .context("提示词占用已超过输入预算，请增加上下文预算或减小输出上限")
         })
         .transpose()?;
-    let mut spool = EvidenceSpool {
-        file: tempfile::NamedTempFile::new()?,
-        offsets: vec![],
-    };
+    let limit = capacity.unwrap_or(config.batch_bytes);
+    let mut spool = streamed
+        .then(|| {
+            Ok::<_, anyhow::Error>(EvidenceSpool {
+                file: tempfile::NamedTempFile::new()?,
+                offsets: vec![],
+            })
+        })
+        .transpose()?;
+    let mut batches = vec![];
     let mut batch = vec![];
     let mut used = 0usize;
+    let mut batch_records = 0usize;
     let mut evidence_tokens = 0usize;
-    let mut count = 0;
-    let flush = |spool: &mut EvidenceSpool, batch: &mut Vec<TextEvidence>| -> Result<()> {
-        let offset = spool.file.stream_position()?;
-        serde_json::to_writer(&mut spool.file, batch)?;
-        let end = spool.file.stream_position()?;
-        spool.offsets.push((offset, end - offset));
-        batch.clear();
+    let mut original_evidence_tokens = 0usize;
+    let mut transmitted_records = 0usize;
+    let mut aggregated_groups = 0usize;
+    let mut count = 0usize;
+    let mut flush = |batch: &mut Vec<TextEvidence>| -> Result<()> {
+        if batch.is_empty() {
+            return Ok(());
+        }
+        if let Some(spool) = &mut spool {
+            let offset = spool.file.stream_position()?;
+            serde_json::to_writer(&mut spool.file, &batch)?;
+            let end = spool.file.stream_position()?;
+            spool.offsets.push((offset, end - offset));
+            batch.clear();
+        } else {
+            batches.push(std::mem::take(batch));
+        }
         Ok(())
     };
+    let mut emit = |item: TextEvidence| -> Result<()> {
+        ctx.check()?;
+        let tokens = estimated_tokens(&item.text, ctx)?.saturating_add(1);
+        let weight = if capacity.is_some() {
+            tokens
+        } else {
+            item.text.len().saturating_add(1)
+        };
+        if weight > limit {
+            bail!("AI 单条证据超过发送预算；证据不会被截断");
+        }
+        // A compressed batch must also bound its local reference mapping.
+        if used.saturating_add(weight) > limit || batch_records + item.members.len() > 8192 {
+            flush(&mut batch)?;
+            used = 0;
+            batch_records = 0;
+        }
+        used += weight;
+        batch_records += item.members.len();
+        evidence_tokens += tokens;
+        transmitted_records += 1;
+        aggregated_groups += usize::from(item.members.len() > 1);
+        batch.push(item);
+        Ok(())
+    };
+    let mut aggregator = super::aggregation::Aggregator::new(limit, capacity.is_some());
     visit(&mut |record| {
         ctx.tick(Stage::AiPreparing, None, count, Some(total))?;
         let text = evidence_text(record, include_payload);
         let tokens = estimated_tokens(&text, ctx)?.saturating_add(1);
-        evidence_tokens = evidence_tokens.saturating_add(tokens);
+        original_evidence_tokens += tokens;
         let weight = if capacity.is_some() {
             tokens
         } else {
             text.len().saturating_add(1)
         };
-        let limit = capacity.unwrap_or(config.batch_bytes);
         if weight > limit {
-            anyhow::bail!(
+            bail!(
                 "AI 单条证据 {} 超过发送预算；证据不会被截断",
                 record.position
             );
         }
-        if used.saturating_add(weight) > limit && !batch.is_empty() {
-            flush(&mut spool, &mut batch)?;
-            used = 0;
+        if config.aggregate_similar {
+            aggregator.push(record, text, ctx, &mut emit)?;
+        } else {
+            emit(TextEvidence {
+                id: record.id.clone(),
+                text,
+                members: vec![record.id.clone()],
+            })?;
         }
-        used = used.saturating_add(weight);
-        batch.push(TextEvidence {
-            id: record.id.clone(),
-            text,
-        });
         count += 1;
         Ok(())
     })?;
-    if !batch.is_empty() {
-        flush(&mut spool, &mut batch)?;
+    aggregator.flush(ctx, &mut emit)?;
+    flush(&mut batch)?;
+    if let Some(spool) = &mut spool {
+        spool.file.flush()?;
     }
-    spool.file.flush()?;
     ctx.check()?;
+    let evidence_batches = spool.as_ref().map_or(batches.len(), |s| s.offsets.len());
     let plan = AiPlan {
         selected_records: count,
+        aggregation_enabled: config.aggregate_similar,
+        transmitted_records,
+        aggregated_groups,
+        original_evidence_tokens,
         evidence_tokens,
         prompt_tokens,
         input_budget_tokens,
         context_tokens: config.context_tokens,
-        evidence_batches: spool.offsets.len(),
-        summary_planned: config.context_tokens.is_some() && spool.offsets.len() > 1,
+        evidence_batches,
+        summary_planned: config.context_tokens.is_some() && evidence_batches > 1,
     };
     Ok(PreparedAi {
         config: config.clone(),
         system,
-        batches: vec![],
-        spool: Some(std::sync::Arc::new(spool)),
+        batches,
+        spool: spool.map(std::sync::Arc::new),
         plan,
         include_payload,
     })
