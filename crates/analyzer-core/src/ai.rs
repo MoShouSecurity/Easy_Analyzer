@@ -12,6 +12,7 @@ use std::{
     time::Duration,
 };
 
+mod aggregation;
 mod planning;
 mod text;
 pub use planning::{AiPlan, PreparedAi, prepare_stream_with_context, prepare_with_context};
@@ -29,6 +30,8 @@ pub struct AiConfig {
     pub timeout_seconds: u64,
     /// UTF-8 byte budget for each evidence text batch, excluding prompts and transport encoding.
     pub batch_bytes: usize,
+    /// Aggregate equivalent log templates within bounded windows before AI batching.
+    pub aggregate_similar: bool,
     /// None preserves legacy byte batching. Some enables context-based planning
     /// and cross-batch synthesis; this is the actual API's shared token limit.
     #[serde(default)]
@@ -48,6 +51,7 @@ impl Default for AiConfig {
             api_key_env: String::new(),
             timeout_seconds: 300,
             batch_bytes: 98_304,
+            aggregate_similar: true,
             context_tokens: Some(1_000_000),
             max_output_tokens: 65_536,
             response_format: "json_object".into(),
@@ -64,6 +68,7 @@ impl std::fmt::Debug for AiConfig {
             .field("api_key_env", &"[redacted]")
             .field("timeout_seconds", &self.timeout_seconds)
             .field("batch_bytes", &self.batch_bytes)
+            .field("aggregate_similar", &self.aggregate_similar)
             .field("context_tokens", &self.context_tokens)
             .field("max_output_tokens", &self.max_output_tokens)
             .field("response_format", &self.response_format)
@@ -201,6 +206,10 @@ pub fn evidence_value(record: &Record, include_payload: bool) -> Value {
 struct TextEvidence {
     id: String,
     text: String,
+    /// Cached once at planning time; local spool metadata, never sent to the API.
+    tokens: usize,
+    /// Original evidence IDs; only the representative ID is transmitted.
+    members: Vec<String>,
 }
 
 #[cfg(test)]
@@ -213,6 +222,7 @@ fn batches(
         records,
         &AiConfig {
             batch_bytes: limit,
+            aggregate_similar: false,
             context_tokens: None,
             ..Default::default()
         },
@@ -423,6 +433,7 @@ pub fn analyze_prepared_with_context(
         batch_results: vec![],
     };
     let mut findings = vec![];
+    let mut references = aggregation::References::default();
     let mut seen = HashSet::new();
     let mut clues = vec![];
     let mut failures = vec![];
@@ -439,7 +450,7 @@ pub fn analyze_prepared_with_context(
             std::mem::take(batches.get_mut(i).context("AI 批次计划不一致")?)
         };
         let user = format!(
-            "当前批次 batch: {}\n总证据批次 total_batches: {}\n当前批次记录数: {}\n包含网络原始包及载荷: {}\n\n{}",
+            "当前批次 batch: {}\n总证据批次 total_batches: {}\n当前批次发送项数: {}\n包含网络原始包及载荷: {}\n\n{}",
             i + 1,
             count,
             batch.len(),
@@ -451,7 +462,7 @@ pub fn analyze_prepared_with_context(
                 .join("\n")
         );
         let ids = batch.iter().map(|r| r.id.clone()).collect();
-        let (batch_result, accepted) = send_batch(
+        let (mut batch_result, accepted) = send_batch(
             &client,
             &config,
             key.as_deref(),
@@ -481,10 +492,16 @@ pub fn analyze_prepared_with_context(
                 error
             ));
         }
+        // Persist original IDs even when a grouped request fails or is cancelled.
+        batch_result.evidence_ids = batch
+            .iter()
+            .flat_map(|r| r.members.iter().cloned())
+            .collect();
         run.batch_results.push(batch_result);
         let Some(parsed) = accepted else { continue };
+        references.retain(&batch, &parsed);
         run.completed_batches = Some(run.completed() + 1);
-        run.analyzed_records += batch.len();
+        run.analyzed_records += batch.iter().map(|r| r.members.len()).sum::<usize>();
         neutral_count += parsed.context.len();
         neutral_preview.extend(
             parsed
@@ -526,6 +543,17 @@ pub fn analyze_prepared_with_context(
                 "跨批汇总未完成：{error:#}；证据批次有效结果与原始回复保留。"
             ));
         }
+    }
+    // Resolve accepted group references after synthesis, including on cancellation.
+    // This finalization preserves valid results rather than abandoning them on cancel.
+    for finding in &mut findings {
+        references.expand(&mut finding.evidence_ids);
+    }
+    for batch in &mut run.batch_results {
+        references.expand(&mut batch.evidence_ids);
+    }
+    for clue in &mut neutral_preview {
+        references.expand(&mut clue.evidence_ids);
     }
     let cancelled = ctx.cancellation.is_cancelled();
     if cancelled {
@@ -1142,6 +1170,68 @@ mod tests {
         }
         assert_eq!(batches(&[&r1, &r2], false, 2000).unwrap().len(), 2);
     }
+    #[test]
+    fn partial_failure_expands_grouped_neutral_references_in_local_recap() {
+        let source = source_for("synthetic-auth.log", "text", b"synthetic");
+        let records: Vec<_> = (0..13)
+            .map(|i| {
+                let user = if i < 12 { "root" } else { "admin" };
+                make_record(
+                    &source,
+                    format!("line:{}", i + 1),
+                    Some("2026-11-04T10:00:01Z".into()),
+                    format!("2026-11-04T10:00:01Z host sshd[42]: Failed password for {user} from 192.0.2.10 port 1234 {}", "x".repeat(300)),
+                    ParseStatus::Parsed,
+                    RecordData::Log(LogData { category: "auth_text".into(), ..Default::default() }),
+                )
+            })
+            .collect();
+        let content = json!({
+            "findings": [],
+            "context": [{
+                "severity": "info", "title": "待关联的登录记录",
+                "description": "仅保留已提供的登录事实，不判断是否异常。",
+                "evidence_ids": [records[0].id], "confidence": 0.5,
+                "recommendations": []
+            }]
+        });
+        // This server accepts exactly one request. The next batch fails to
+        // connect, exercising a real partial-result path without an external API.
+        let body = json!({"choices": [{"message": {"content": content.to_string()}}]}).to_string();
+        let (url, server) = mock("200 OK", body, Duration::ZERO);
+        let mut config = AiConfig {
+            base_url: url,
+            model: "mock".into(),
+            context_tokens: None,
+            ..Default::default()
+        };
+        let ctx = ExecutionContext::default();
+        let refs: Vec<_> = records.iter().collect();
+        let preview = prepare_with_context(&refs, &config, false, &ctx).unwrap();
+        assert_eq!(preview.plan.transmitted_records, 2);
+        config.batch_bytes = preview.batches[0]
+            .iter()
+            .map(|item| item.text.len() + 1)
+            .max()
+            .unwrap();
+        let prepared = prepare_with_context(&refs, &config, false, &ctx).unwrap();
+        assert_eq!(prepared.plan.evidence_batches, 2);
+        let result = analyze_prepared_with_context(prepared, &ctx, |_, _, _| {}).unwrap();
+        server.join().unwrap();
+        assert!(!result.cancelled);
+        assert!(result.analysis.error.is_some());
+        assert_eq!(result.analysis.run.completed(), 1);
+        assert_eq!(result.analysis.run.analyzed_records, 12);
+        assert!(result.analysis.findings.is_empty());
+        let recap = result.analysis.local_summary.unwrap();
+        assert!(recap.contains("中性线索：待关联的登录记录"));
+        for record in records.iter().take(5) {
+            assert!(recap.contains(&record.id));
+        }
+        assert!(recap.contains("另 7 个引用"));
+        assert!(!recap.contains(&records[12].id));
+    }
+
     #[test]
     fn local_recap_preserves_neutral_facts_without_creating_findings() {
         let coverage = EvidenceCoverage {

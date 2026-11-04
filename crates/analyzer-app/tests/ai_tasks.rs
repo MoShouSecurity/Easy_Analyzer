@@ -924,3 +924,172 @@ fn hierarchical_summary_reports_current_batch_and_total_for_each_round() {
         assert_eq!(events, (1..=total).map(|i| (i, total)).collect::<Vec<_>>());
     }
 }
+
+fn repeated_auth_request(count: usize) -> AnalysisRequest {
+    let text = (0..count).map(|i| format!("2026-11-04T10:00:{:02}Z host sshd[42]: Failed password for root from 192.0.2.10 port 12345 ssh2\n", i % 60)).collect::<String>();
+    AnalysisRequest {
+        inputs: vec![AnalysisInput::Bytes {
+            label: "host-a/auth.log".into(),
+            bytes: text.into_bytes().into(),
+        }],
+        ..Default::default()
+    }
+}
+
+#[test]
+fn aggregated_project_analysis_restores_all_references_and_survives_save_export_reopen() {
+    let server = Server::new(Duration::ZERO, false);
+    let ctx = ExecutionContext::default();
+    let session = ProjectService::create(ProjectInfo::new("合成聚合测试", "合成客户")).unwrap();
+    ProjectService::append(&session, &repeated_auth_request(120), &ctx).unwrap();
+    let ids: Vec<_> = session
+        .page(None, 0, 200)
+        .unwrap()
+        .items
+        .into_iter()
+        .map(|r| r.id)
+        .collect();
+    let config = context_config(&server, 1_000_000);
+    let prepared =
+        AnalysisService::prepare_ai_with_config(&session, &all_options(), None, &config, &ctx)
+            .unwrap();
+    assert_eq!(prepared.plan().selected_records, 120);
+    assert_eq!(prepared.plan().transmitted_records, 1);
+    assert_eq!(server.count.load(Ordering::SeqCst), 0);
+    let outcome = AnalysisService::analyze_prepared_ai(prepared, &ctx).unwrap();
+    assert_eq!(outcome.status, TaskStatus::Completed);
+    session
+        .with_report(|report| {
+            let finding = report
+                .findings
+                .iter()
+                .find(|f| f.origin.starts_with("ai:"))
+                .unwrap();
+            assert_eq!(finding.evidence_ids, ids);
+            assert_eq!(report.ai_runs[0].analyzed_records, 120);
+            assert_eq!(report.ai_runs[0].selected(), 120);
+            assert_eq!(report.ai_runs[0].batch_results[0].evidence_ids, ids);
+        })
+        .unwrap();
+    let requests = server.requests.lock().unwrap();
+    let user = requests[0]["messages"][1]["content"].as_str().unwrap();
+    assert!(user.contains("原始记录数: 120"));
+    assert!(user.contains(&ids[0]));
+    assert!(!user.contains(&ids[1]));
+    drop(requests);
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("aggregated.eair");
+    ProjectService::save(&session, &path, Path::new("unused.toml"), false, &ctx).unwrap();
+    let reopened = ProjectService::open(&path, &ctx).unwrap();
+    let output = dir.path().join("report.json");
+    ExportPlan {
+        json_path: Some(output.clone()),
+        ..Default::default()
+    }
+    .save(&reopened, Path::new("unused.toml"))
+    .unwrap();
+    let exported: core::AnalysisReport =
+        serde_json::from_slice(&std::fs::read(output).unwrap()).unwrap();
+    assert_eq!(exported.records.len(), 120);
+    assert_eq!(exported.schema_version, core::model::SCHEMA_VERSION);
+    assert_eq!(
+        exported
+            .findings
+            .iter()
+            .find(|f| f.origin.starts_with("ai:"))
+            .unwrap()
+            .evidence_ids,
+        ids
+    );
+    assert!(
+        exported
+            .records
+            .iter()
+            .all(|r| r.raw.starts_with("2026-11-04"))
+    );
+}
+
+#[test]
+fn grouped_references_remain_compact_during_synthesis_and_expand_after_cancel() {
+    for cancelled in [false, true] {
+        let server = Server::new(
+            if cancelled {
+                Duration::from_millis(150)
+            } else {
+                Duration::ZERO
+            },
+            false,
+        );
+        let ctx = ExecutionContext::default();
+        let mut request = repeated_auth_request(120);
+        // Add a second template with a distinct account, forcing another group.
+        if let AnalysisInput::Bytes { bytes, .. } = &mut request.inputs[0] {
+            let original = String::from_utf8(bytes.to_vec()).unwrap();
+            *bytes = format!("{}{}", original, original.replace("for root", "for admin"))
+                .into_bytes()
+                .into();
+        }
+        let session = AnalysisService::load(&request, &ctx).unwrap().session;
+        let mut config = context_config(&server, 9_000);
+        // Each 60-second group fits this budget, while both require separate requests.
+        config.max_output_tokens = 512;
+        let prepared =
+            AnalysisService::prepare_ai_with_config(&session, &all_options(), None, &config, &ctx)
+                .unwrap();
+        assert_eq!(prepared.plan().transmitted_records, 2);
+        assert!(
+            prepared.plan().evidence_batches >= 2,
+            "{:?}",
+            prepared.plan()
+        );
+        let token = ctx.cancellation.clone();
+        let handle = std::thread::spawn(move || {
+            AnalysisService::analyze_prepared_ai(prepared, &ctx).unwrap()
+        });
+        if cancelled {
+            server.wait_request();
+            token.cancel();
+        }
+        let outcome = handle.join().unwrap();
+        assert_eq!(
+            outcome.status,
+            if cancelled {
+                TaskStatus::Cancelled
+            } else {
+                TaskStatus::Completed
+            }
+        );
+        outcome
+            .session
+            .with_report(|report| {
+                let run = &report.ai_runs[0];
+                assert_eq!(run.analyzed_records, if cancelled { 120 } else { 240 });
+                assert!(
+                    report
+                        .findings
+                        .iter()
+                        .filter(|f| f.origin.starts_with("ai:"))
+                        .all(|f| f.evidence_ids.len() >= 120)
+                );
+                assert!(
+                    run.batch_results
+                        .iter()
+                        .all(|batch| batch.evidence_ids.len() >= 120)
+                );
+            })
+            .unwrap();
+        let requests = server.requests.lock().unwrap();
+        if cancelled {
+            assert_eq!(requests.len(), 1);
+        } else {
+            let summary = requests.last().unwrap()["messages"][1]["content"]
+                .as_str()
+                .unwrap();
+            assert!(summary.starts_with("阶段：跨批汇总"));
+            // Only representative IDs travel to the summary, never all 240 originals.
+            let evidence_ids = summary.matches("evidence_ids").count();
+            assert_eq!(evidence_ids, 2);
+            assert!(summary.len() < 3000);
+        }
+    }
+}
