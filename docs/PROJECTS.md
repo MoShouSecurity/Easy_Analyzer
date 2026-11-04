@@ -103,6 +103,14 @@ easy-analyzer project open response.eair --ioc-stdin --ioc-stdin-csv \
 - 输出路径保护覆盖原证据、配置、IOC 和项目；保存识别原文件 UUID/修订变化。项目没有 AI 配置密钥字段。项目目录仅保存基本资料、路径和最近打开时间，没有证据表；默认位于应用数据目录，可用 `EASY_ANALYZER_DATA_DIR` 指定隔离目录。
 - GUI 后台任务绑定会话和修订，切换清除旧选择/预览；旧任务结果拒绝写入新项目。HTML 显示项目名称、客户及响应时间，JSON 沿用现有报告 schema，完整项目资料和备注留在数据库。
 
+## 验证记录（2026-11-04，v1.6.0）
+
+macOS ARM64 本地执行 `cargo test --workspace`：130 项通过、6 项忽略（benchmark 等）、0 失败；GUI 前端 89 项测试通过；`cargo fmt --check`、Clippy 和前端生产构建通过。AI 证据聚合使用合成日志和本地 HTTP mock 验证分组、预算回退、跨批引用、取消与部分失败，未调用真实外部模型。
+
+Linux 应急响应命令在 Docker 官方 `busybox:1.37`（完整与受限 PATH）和 `debian:bookworm-slim` 三组环境中各执行 24 条，共 72 次通过；另含可选 systemd/lastb 接口替身、复制失败、不覆盖已有证据和缺失源文件检查。验证脚本的测试参数替换要求恰好命中一次，并新增 3 项 Python 单元测试。
+
+Windows 命令本轮未实机执行；未覆盖真实桌面、Windows 主机、任意 BusyBox 构建或外部 AI 服务。AI token 数字为本地估算，不代表服务计费。
+
 ## 验证记录（2026-10-15，v1.5.1）
 
 macOS ARM64 本地 Rust workspace 120 项、GUI 前端 85 项测试通过，另通过格式检查、Clippy 和前端生产构建。使用真实 2,422,767 条记录的压缩项目，在独立工作副本中逐行对照 SQL 核对 168 组分页结果，覆盖原始正/倒序、来源/分类/解析状态、每页 50/100/200 条、首页/中间页/末页/回跳及越界；原项目未改写。
