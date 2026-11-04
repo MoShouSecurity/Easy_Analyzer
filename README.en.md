@@ -87,6 +87,12 @@ The macOS GUI currently uses an ad-hoc signature and is not notarized. See the p
 5. For AI assistance, configure the service URL, model, and API key in settings. Select an evidence scope, review the sending preview, and start analysis.
 6. Click “保存” (Save) to write the `.eair` file, and export HTML/JSON reports as needed. Open “应急响应命令” (Response commands) from the left sidebar at any time.
 
+Linux response snippets prioritize common BusyBox applets and `sh`/`ash` syntax,
+with fallbacks or explicit notices when tools or logs are missing. They do not
+require `sudo`, `lsof`, `pstree`, or systemd. Windows account, network, and task
+queries prefer built-in commands. See [command compatibility and container
+validation](docs/RESPONSE_COMMANDS.md) for parameters and limitations.
+
 After opening a project, use “编辑资料” (Edit details) in the toolbar or “编辑项目资料” (Edit project details) on the home page to change its name, client organization, response start/end times, location, responders, and description. Click “应用修改” (Apply changes), then “保存” (Save) to write the changes to the project file.
 
 On “日志证据” (Log evidence), “多维查询” combines time ranges, levels, client IPs, HTTP status codes, methods, paths, loggers, hosts, and custom fields for Nginx/Apache, common Tomcat/Java application logs, and authentication logs. Windows-specific conditions expand separately. Ascending/descending chronological or original order applies before pagination. An explicit source UTC offset enables queries on full-date logs without a timezone, preserving original evidence. Query settings are saved with the project; see [log queries](docs/PROJECTS.md#日志多维查询).
@@ -143,6 +149,7 @@ The project name defaults to the client organization; use `--name` to override i
 ```
 
 New configurations plan requests using the model context budget. Adjust the budget to the capabilities of your service and model. `config check` explicitly tests connectivity with a small request that contains no project evidence.
+
 
 ## IOC format
 

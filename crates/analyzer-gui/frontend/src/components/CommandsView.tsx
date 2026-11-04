@@ -54,9 +54,14 @@ export function CommandsView() {
       item.platform === platform &&
       (!category || item.category === category) &&
       (!term ||
-        [item.title, item.description, item.command].some((value) =>
-          value.toLocaleLowerCase().includes(term),
-        )),
+        [
+          item.title,
+          item.description,
+          item.command,
+          item.notes,
+          item.permission,
+          item.shell,
+        ].some((value) => value.toLocaleLowerCase().includes(term))),
   );
   return (
     <section className="commands-view" aria-label="应急响应命令库">
@@ -86,7 +91,7 @@ export function CommandsView() {
               <Search size={15} aria-hidden="true" />
               <input
                 aria-label="搜索应急响应命令"
-                placeholder="搜索命令名称、用途或命令文本…"
+                placeholder="搜索名称、用途、命令或适用条件…"
                 value={query}
                 onChange={(event) => {
                   setQuery(event.target.value);
@@ -112,7 +117,7 @@ export function CommandsView() {
           <p className="commands-environment">
             {platform === "windows"
               ? "适用于 Windows 10 / Server 2016 及以上；PowerShell 命令默认使用 64 位 Windows PowerShell 5.1。"
-              : "适用于 Linux Bash；工具、日志路径及 systemd 要求见各命令说明。"}
+              : "优先使用 BusyBox 常见命令，兼容 sh / ash；无需 sudo。BusyBox 可裁剪工具，缺失工具、日志或权限时按条目提示处理；示例 PID 默认为当前 Shell，路径请按实际替换。"}
           </p>
           <div className="commands-list">
             {items.length ? (

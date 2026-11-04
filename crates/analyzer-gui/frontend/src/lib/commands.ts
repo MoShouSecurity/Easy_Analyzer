@@ -14,7 +14,7 @@ export interface ResponseCommand {
   category: CommandCategory;
   title: string;
   description: string;
-  shell: "PowerShell" | "CMD" | "Bash";
+  shell: "PowerShell" | "CMD" | "sh";
   permission: string;
   command: string;
   notes: string;
@@ -56,7 +56,7 @@ function linux(
     category,
     title,
     description,
-    shell: "Bash",
+    shell: "sh",
     permission,
     command,
     notes,
@@ -65,16 +65,18 @@ function linux(
 
 // Windows baseline: 64-bit Windows PowerShell 5.1, Windows 10 / Server 2016+.
 // Syntax references: Microsoft Learn Windows commands and PowerShell modules
-// (CimCmdlets, NetTCPIP, LocalAccounts, ScheduledTasks, Diagnostics, Utility, Security).
+// (CimCmdlets, Diagnostics, Utility, Security); account/network/task lists prefer
+// built-in net.exe, netstat.exe, ipconfig.exe and schtasks.exe.
 // https://learn.microsoft.com/en-us/windows-server/administration/windows-commands/wevtutil
 // https://learn.microsoft.com/en-us/powershell/module/cimcmdlets/get-ciminstance
 // https://learn.microsoft.com/en-us/powershell/module/microsoft.powershell.diagnostics/get-winevent
-// Linux references: procps-ng, util-linux, iproute2, lsof, GNU coreutils/findutils,
-// Cronie and systemd manuals. Availability is stated per entry; nothing is installed.
-// https://man7.org/linux/man-pages/man8/ss.8.html
-// https://man7.org/linux/man-pages/man8/lsof.8.html
-// https://www.freedesktop.org/software/systemd/man/255/journalctl.html
-// https://www.gnu.org/software/coreutils/manual/coreutils.html
+// Linux baseline: POSIX sh / BusyBox ash and common BusyBox applets.
+// BusyBox applets/options are build-time choices; missing tools/files are reported.
+// https://busybox.net/downloads/BusyBox.html
+// https://man7.org/linux/man-pages/man5/proc_pid_fd.5.html
+// https://man7.org/linux/man-pages/man5/proc_pid_net.5.html
+// https://learn.microsoft.com/en-us/windows-server/administration/windows-commands/netstat
+// https://learn.microsoft.com/en-us/windows-server/administration/windows-commands/schtasks-query
 export const responseCommands: readonly ResponseCommand[] = [
   windows(
     "system-info",
@@ -100,17 +102,21 @@ export const responseCommands: readonly ResponseCommand[] = [
     "local-users",
     "system",
     "查看本地账号",
-    "核查账号是否启用、最近登录时间及密码设置时间。",
-    "Get-LocalUser | Select-Object Name, Enabled, LastLogon, PasswordLastSet, Description",
-    "需要 LocalAccounts 模块和 64 位 PowerShell；域控制器没有普通本地账号库。",
+    "列出本机账号；需要具体账号详情时再运行 net user 账号名。",
+    "net user",
+    "Windows 内置命令，不依赖 LocalAccounts 模块。普通成员主机查询本地账号；域控制器上的账号语义不同。",
+    "普通用户",
+    "CMD",
   ),
   windows(
     "administrators",
     "system",
     "查看本地管理员组成员",
-    "核查本地 Administrators 组中是否存在非预期账号。",
-    "Get-LocalGroup -SID 'S-1-5-32-544' | Get-LocalGroupMember",
-    "按固定 SID 查询，兼容不同语言的组名；需要 LocalAccounts 模块，不适用于域控制器。",
+    "按固定 SID 解析管理员组名称，兼容不同语言的系统。",
+    "$GroupName = ([System.Security.Principal.SecurityIdentifier]'S-1-5-32-544').Translate([System.Security.Principal.NTAccount]).Value.Split('\\')[-1]\nnet localgroup \"$GroupName\"",
+    "使用 Windows PowerShell 内置 .NET 类型与 net.exe，不依赖 LocalAccounts 模块；不适用于没有普通本地组的域控制器。",
+    "普通用户；管理员可读取更多信息",
+    "PowerShell",
   ),
 
   windows(
@@ -153,35 +159,41 @@ export const responseCommands: readonly ResponseCommand[] = [
     "tcp",
     "network",
     "查看 TCP 连接",
-    "查看连接地址、端口、状态及所属进程 PID。",
-    "Get-NetTCPConnection |\n  Sort-Object State, OwningProcess |\n  Select-Object LocalAddress, LocalPort, RemoteAddress, RemotePort, State, OwningProcess",
-    "需要 NetTCPIP 模块；OwningProcess 可与进程清单中的 PID 对照。",
+    "查看 TCP 地址、端口、状态及所属 PID，包含监听端口。",
+    "netstat -ano -p tcp\nnetstat -ano -p tcpv6",
+    "Windows 内置 netstat，分别查询 IPv4/IPv6。末列 PID 可与 tasklist 对照；连接表不是历史记录。",
+    "普通用户；管理员可读取更多信息",
+    "CMD",
   ),
   windows(
     "udp",
     "network",
     "查看 UDP 端点",
-    "查看本机 UDP 绑定地址、端口及所属 PID。",
-    "Get-NetUDPEndpoint |\n  Select-Object LocalAddress, LocalPort, OwningProcess",
-    "需要 NetTCPIP 模块；UDP 端点列表不会提供完整的远端通信历史。",
+    "查看 IPv4/IPv6 UDP 绑定地址、端口及所属 PID。",
+    "netstat -ano -p udp\nnetstat -ano -p udpv6",
+    "Windows 内置 netstat，不依赖 NetTCPIP 模块；UDP 端点不代表完整的远端通信历史。",
+    "普通用户；管理员可读取更多信息",
+    "CMD",
   ),
   windows(
     "ip-config",
     "network",
     "查看网络配置",
-    "查看网卡、IP 地址、默认网关及 DNS 服务器。",
-    "Get-NetIPConfiguration -Detailed",
-    "需要 NetTCPIP 模块；仅查询当前配置，不修改网卡或路由。",
+    "查看网卡、IP、网关和 DNS 配置。",
+    "ipconfig /all",
+    "Windows 内置命令，仅查询配置，不修改网卡或路由。",
     "普通用户",
+    "CMD",
   ),
   windows(
     "dns-cache",
     "network",
     "查看 DNS 缓存",
-    "核查主机最近缓存的域名解析记录。",
-    "Get-DnsClientCache",
-    "需要 DnsClient 模块；缓存会过期，不能代表完整 DNS 访问历史。",
+    "核查主机当前缓存的域名解析记录。",
+    "ipconfig /displaydns",
+    "Windows 内置命令，不依赖 DnsClient 模块；缓存可能为空或已过期，不能代表全部访问历史。",
     "普通用户",
+    "CMD",
   ),
 
   windows(
@@ -196,9 +208,11 @@ export const responseCommands: readonly ResponseCommand[] = [
     "tasks",
     "persistence",
     "查看计划任务及动作",
-    "列出计划任务的程序、参数和触发器。",
-    "Get-ScheduledTask |\n  Select-Object TaskPath, TaskName, State, Actions, Triggers |\n  Format-List",
-    "需要 ScheduledTasks 模块。管理员可查看更多任务；Actions 和 Triggers 需结合任务用途核查。",
+    "以详细列表查看任务执行程序、参数、计划和运行账号。",
+    "schtasks /query /fo LIST /v",
+    "Windows 内置命令，不依赖 ScheduledTasks 模块；管理员可查看更多任务，不创建或运行任务。",
+    "普通用户；管理员可读取更多信息",
+    "CMD",
   ),
   windows(
     "run-keys",
@@ -311,213 +325,490 @@ Get-ChildItem -LiteralPath $SearchRoot -File -Recurse -Force |
     "system-info",
     "system",
     "查看系统版本",
-    "查看内核、架构和发行版标识。",
-    "uname -a\ncat /etc/os-release",
-    "需要 uname 和 cat；部分较旧或精简系统可能没有 /etc/os-release。",
+    "查看内核、架构和可用的发行版标识。",
+    `uname -a
+if [ -r /etc/os-release ]; then
+  cat /etc/os-release
+elif [ -r /etc/issue ]; then
+  cat /etc/issue
+else
+  printf '%s\\n' '没有可读的发行版标识文件。'
+fi`,
+    "使用 uname、cat 和 sh；不存在 /etc/os-release 时读取 /etc/issue，不要求额外安装发行版工具。",
+    "普通用户",
   ),
   linux(
     "uptime",
     "system",
-    "查看启动时间与负载",
-    "查看启动时间、运行时长和当前负载。",
-    "uptime -s\nuptime",
-    "需要 procps-ng 的 uptime；-s 不一定被 BusyBox 版本支持。",
+    "查看运行时长与负载",
+    "查看运行时长、在线用户数及系统负载；缺少 uptime 时读取内核数据。",
+    `if command -v uptime >/dev/null 2>&1; then
+  uptime
+else
+  for INFO_FILE in /proc/uptime /proc/loadavg; do
+    if [ -r "$INFO_FILE" ]; then
+      printf '\\n--- %s ---\\n' "$INFO_FILE"
+      cat "$INFO_FILE"
+    else
+      printf '无法读取 %s，请检查 procfs 和权限。\\n' "$INFO_FILE"
+    fi
+  done
+fi`,
+    "不使用 uptime -s。/proc/uptime 第一列是启动后秒数；容器中的运行时长可能对应宿主内核。",
+    "普通用户",
   ),
   linux(
     "accounts",
     "system",
     "查看系统账号清单",
-    "查询 NSS 可见账号及 UID、家目录和登录 Shell。",
-    "getent passwd",
-    "需要 getent；结果可能包含 LDAP 等目录服务账号，不局限于 /etc/passwd。",
+    "读取本地账号和组配置，核对 UID、GID、家目录与登录 Shell。",
+    `for ACCOUNT_FILE in /etc/passwd /etc/group; do
+  if [ -r "$ACCOUNT_FILE" ]; then
+    printf '\\n--- %s ---\\n' "$ACCOUNT_FILE"
+    cat "$ACCOUNT_FILE"
+  else
+    printf '无法读取 %s，请检查文件和权限。\\n' "$ACCOUNT_FILE"
+  fi
+done`,
+    "只需 cat；不依赖 getent。结果仅覆盖本地文件，不包含 LDAP 等目录服务中的全部账号。",
+    "普通用户",
   ),
   linux(
     "logged-in",
     "system",
-    "查看当前登录用户",
-    "查看登录用户、来源、终端及当前活动。",
-    "who -a\nw",
-    "需要 GNU coreutils 的 who 和 procps-ng 的 w；依赖 utmp，容器或部分精简系统可能没有记录。",
+    "查看当前身份与登录用户",
+    "查看当前终端身份和系统保存的在线登录会话。",
+    `id
+if command -v who >/dev/null 2>&1; then
+  who
+else
+  printf '%s\\n' '没有 who；只能确认上方当前终端身份，无法列出全部登录会话。'
+fi`,
+    "不使用 who -a 或 w。who 依赖 utmp；空输出可能是未留存会话记录，不能据此认定没有远程登录。",
+    "普通用户",
   ),
-
   linux(
     "processes",
     "process",
     "查看进程清单",
-    "查看账号、PID、PPID、启动时间及完整进程参数。",
-    "ps -eo user,pid,ppid,lstart,args --forest",
-    "需要 procps-ng；--forest 不一定被 BusyBox ps 支持。",
+    "优先查看 PID、PPID、账号和参数；精简 ps 使用基础输出，无 ps 时读取 /proc。",
+    `if command -v ps >/dev/null 2>&1; then
+  if ps -eo pid,ppid,user,args >/dev/null 2>&1; then
+    ps -eo pid,ppid,user,args
+  else
+    ps
+  fi
+elif [ -d /proc/1 ]; then
+  printf '%s\\n' '没有 ps，以下从 /proc 读取名称、PID、PPID 与数值 UID。'
+  for PROCESS_DIR in /proc/[0-9]*; do
+    if [ -r "$PROCESS_DIR/status" ]; then
+      printf '\\n--- %s ---\\n' "$PROCESS_DIR"
+      sed -n '/^Name:/p; /^Pid:/p; /^PPid:/p; /^Uid:/p' "$PROCESS_DIR/status"
+    fi
+  done
+else
+  printf '%s\\n' '没有 ps 或可用的 procfs，无法枚举进程。'
+fi`,
+    "兼容常见 BusyBox/procps ps，不使用 --forest、lstart 等扩展。基础 ps 的列和覆盖范围依实现而异；/proc 回退只显示可读进程的名称、PID、PPID 和数值 UID。",
     "普通用户；root 可读取更多进程信息",
   ),
   linux(
-    "process-tree",
+    "process-parent",
     "process",
-    "查看进程树",
-    "查看进程层级、PID 和启动参数。",
-    "pstree -ap",
-    "需要 psmisc 的 pstree；部分进程参数受权限和 /proc 挂载选项限制。",
+    "查看进程父 PID",
+    "从 /proc 读取进程名称、PID、PPID 和数值 UID，核对启动关系。",
+    `if [ -d /proc/1 ]; then
+  for PROCESS_DIR in /proc/[0-9]*; do
+    if [ -r "$PROCESS_DIR/status" ]; then
+      printf '\\n--- %s ---\\n' "$PROCESS_DIR"
+      sed -n '/^Name:/p; /^Pid:/p; /^PPid:/p; /^Uid:/p' "$PROCESS_DIR/status"
+    fi
+  done
+else
+  printf '%s\\n' '没有可用的 procfs，请先确认 /proc 挂载情况。'
+fi`,
+    "只需 sh、sed 和 procfs，不依赖 pstree。输出是瞬时快照；进程退出、PID 复用和 hidepid 会影响结果，不能只凭 PPID 判断攻击链。",
     "普通用户；root 可读取更多进程信息",
   ),
   linux(
     "process-files",
     "process",
     "查看指定进程打开文件",
-    "核查目标进程打开的文件、设备和套接字。",
-    'PROCESS_ID=1234\nsudo lsof -nP -p "$PROCESS_ID"',
-    "将 1234 替换为目标 PID；需要 lsof 和 sudo，也可由 root 直接运行 lsof。",
-    "root；或具备 sudo 权限",
+    "查看目标进程的文件描述符及链接到的文件、管道和套接字。",
+    `PROCESS_ID=$$ # 默认当前 Shell，替换为要检查的 PID
+if [ -d "/proc/$PROCESS_ID/fd" ]; then
+  ls -l "/proc/$PROCESS_ID/fd"
+else
+  printf '%s\\n' '进程已退出、PID 不存在，或没有读取 /proc 的权限。'
+fi`,
+    "使用 ls 和 procfs，不依赖 lsof/sudo；socket:[数字] 是套接字 inode。访问其他用户的进程通常需要 root。",
+    "目标进程所属用户或 root",
   ),
   linux(
     "process-command",
     "process",
     "查看进程路径与命令行",
-    "读取目标进程的可执行路径及 NUL 分隔的完整参数。",
-    "PROCESS_ID=1234\nsudo readlink -f \"/proc/$PROCESS_ID/exe\"\nsudo cat \"/proc/$PROCESS_ID/cmdline\" | tr '\\0' ' '\nprintf '\\n'",
-    "替换 PID。需要挂载 procfs、coreutils 和 sudo；进程退出后路径会消失，exe 的 deleted 标记需进一步核查。",
-    "目标进程所属用户或 root；示例使用 sudo",
+    "读取进程可执行文件链接，并展开 NUL 分隔的命令行参数。",
+    `PROCESS_ID=$$ # 默认当前 Shell，替换为要检查的 PID
+if [ -d "/proc/$PROCESS_ID" ]; then
+  ls -l "/proc/$PROCESS_ID/exe"
+  if [ -r "/proc/$PROCESS_ID/cmdline" ]; then
+    tr '\\000' ' ' < "/proc/$PROCESS_ID/cmdline"
+    printf '\\n'
+  else
+    printf '%s\\n' '无法读取命令行，请检查进程状态和权限。'
+  fi
+else
+  printf '%s\\n' 'PID 不存在，或 procfs 不可用。'
+fi`,
+    "使用 ls、tr 和 procfs；不要求 readlink -f。内核线程的 cmdline 可能为空；空字段或 deleted 标记需结合进程状态核查。",
+    "目标进程所属用户或 root",
   ),
-
   linux(
     "connections",
     "network",
     "查看当前 TCP/UDP 连接",
-    "列出当前连接和所属进程，辅助核对非预期出站通信。",
-    "sudo ss -antup",
-    "需要 iproute2 和 sudo；-p 的进程信息受权限限制，连接列表不是通信历史。",
-    "root；或具备 sudo 权限",
+    "查看数字地址、端口和连接状态；工具缺失时保留内核原始表。",
+    `if command -v netstat >/dev/null 2>&1; then
+  netstat -antu
+elif command -v ss >/dev/null 2>&1; then
+  ss -antu
+else
+  printf '%s\\n' '没有 netstat/ss，以下为原始表；地址与端口采用十六进制。'
+  for SOCKET_TABLE in /proc/net/tcp /proc/net/tcp6 /proc/net/udp /proc/net/udp6; do
+    if [ -r "$SOCKET_TABLE" ]; then
+      printf '\\n--- %s ---\\n' "$SOCKET_TABLE"
+      cat "$SOCKET_TABLE"
+    fi
+  done
+fi`,
+    "优先使用 BusyBox netstat 支持的 -antu；不要求 -p。/proc/net 只代表当前网络命名空间，不是通信历史；进程归属需另对照套接字 inode。",
+    "普通用户",
   ),
   linux(
     "listeners",
     "network",
     "查看监听端口",
-    "核查 TCP/UDP 监听地址、端口及所属进程。",
-    "sudo ss -lntup",
-    "需要 iproute2；0.0.0.0 或 :: 监听是否可从外部访问，还取决于防火墙和网络配置。",
-    "root；或具备 sudo 权限",
+    "查看 TCP 监听及 UDP 绑定；没有网络工具时读取对应的内核表。",
+    `if command -v netstat >/dev/null 2>&1; then
+  netstat -lntu
+elif command -v ss >/dev/null 2>&1; then
+  ss -lntu
+else
+  printf '%s\\n' '没有 netstat/ss，以下地址和端口为十六进制。'
+  for SOCKET_TABLE in /proc/net/tcp /proc/net/tcp6; do
+    if [ -r "$SOCKET_TABLE" ]; then
+      printf '\\n--- TCP LISTEN: %s ---\\n' "$SOCKET_TABLE"
+      awk 'NR == 1 || $4 == "0A"' "$SOCKET_TABLE"
+    fi
+  done
+  for SOCKET_TABLE in /proc/net/udp /proc/net/udp6; do
+    if [ -r "$SOCKET_TABLE" ]; then
+      printf '\\n--- UDP 绑定表: %s ---\\n' "$SOCKET_TABLE"
+      cat "$SOCKET_TABLE"
+    fi
+  done
+fi`,
+    "不使用 sudo；UDP 表包含绑定及已连接套接字。0.0.0.0/:: 监听不等于外部一定可访问，还需核查防火墙、网络命名空间和网络配置。",
+    "普通用户",
   ),
   linux(
     "ip-route",
     "network",
     "查看地址与路由",
-    "查看网卡地址、IPv4 和 IPv6 路由。",
-    "ip -br address\nip route show\nip -6 route show",
-    "需要 iproute2；-br 为简洁输出，较旧版本可改为 ip address show。",
+    "优先使用 BusyBox 常见的 ifconfig/route，缺失时尝试 ip 或内核原始信息。",
+    `if command -v ifconfig >/dev/null 2>&1; then
+  ifconfig -a
+elif command -v ip >/dev/null 2>&1; then
+  ip address show
+else
+  printf '%s\\n' '没有 ifconfig/ip，以下仅为接口计数，不是完整 IP 地址列表。'
+  if [ -r /proc/net/dev ]; then cat /proc/net/dev; fi
+fi
+if command -v route >/dev/null 2>&1; then
+  route -n
+elif command -v ip >/dev/null 2>&1; then
+  ip route show
+else
+  printf '%s\\n' '没有 route/ip，以下为原始 IPv4 路由表，地址为十六进制。'
+  if [ -r /proc/net/route ]; then cat /proc/net/route; fi
+fi
+if [ -r /proc/net/if_inet6 ]; then
+  printf '\\n%s\\n' '--- 原始 IPv6 接口地址（十六进制）---'
+  cat /proc/net/if_inet6
+fi
+if [ -r /proc/net/ipv6_route ]; then
+  printf '\\n%s\\n' '--- 原始 IPv6 路由（十六进制）---'
+  cat /proc/net/ipv6_route
+fi`,
+    "不使用 ip -br。ifconfig/route 取决于 BusyBox 构建选项；原始 IPv6 表保留完整数值但不解码。",
+    "普通用户",
   ),
   linux(
     "network-processes",
     "network",
-    "查看进程网络连接",
-    "通过打开的网络文件核查进程与连接的关系。",
-    "sudo lsof -nP -i",
-    "需要 lsof 和 sudo；-nP 禁止名称解析，结果保留数字地址和端口。",
-    "root；或具备 sudo 权限",
+    "核对进程套接字与网络表",
+    "将进程 fd 中的 socket inode 与同一网络命名空间的网络表对照。",
+    `PROCESS_ID=$$ # 默认当前 Shell，替换为要检查的 PID
+if [ -d "/proc/$PROCESS_ID/fd" ]; then
+  printf '%s\\n' '--- 进程文件描述符：关注 socket:[inode] ---'
+  ls -l "/proc/$PROCESS_ID/fd"
+  for SOCKET_TABLE in "/proc/$PROCESS_ID/net/tcp" "/proc/$PROCESS_ID/net/tcp6" "/proc/$PROCESS_ID/net/udp" "/proc/$PROCESS_ID/net/udp6" "/proc/$PROCESS_ID/net/unix"; do
+    if [ -r "$SOCKET_TABLE" ]; then
+      printf '\\n--- %s ---\\n' "$SOCKET_TABLE"
+      cat "$SOCKET_TABLE"
+    fi
+  done
+else
+  printf '%s\\n' '进程不存在或没有读取权限，请核对 PID 和权限。'
+fi`,
+    "只使用 ls/cat；/proc/PID/net 包含该进程网络命名空间的全部套接字，并非全部属于该进程，必须按 fd 的 inode 对照；原始地址/端口未解码。",
+    "目标进程所属用户或 root",
   ),
-
   linux(
-    "enabled-services",
+    "startup-services",
     "persistence",
-    "查看开机启用服务",
-    "查看 systemd 中设置为 enabled 的服务单元。",
-    "systemctl list-unit-files --type=service --state=enabled --no-pager",
-    "仅适用于 systemd；enabled 不代表当前正在运行，也不覆盖静态单元或其他启动机制。",
+    "查看启动服务配置",
+    "列出常见 SysV、OpenRC 和 systemd 的启动配置路径，不执行脚本。",
+    `FOUND_CONFIG=0
+for CONFIG_DIR in /etc/init.d /etc/rc*.d /etc/runlevels/* /etc/systemd/system /usr/lib/systemd/system /lib/systemd/system; do
+  if [ -d "$CONFIG_DIR" ]; then
+    FOUND_CONFIG=1
+    printf '\\n--- %s ---\\n' "$CONFIG_DIR"
+    ls -la "$CONFIG_DIR"
+  fi
+done
+if [ "$FOUND_CONFIG" -eq 0 ]; then
+  printf '%s\\n' '没有发现这些常见启动目录；请核查该系统实际使用的 init。'
+fi`,
+    "只需 ls 和 sh，不要求 systemctl；目录内容不等于已启用或正在运行的服务。不会覆盖所有 init 实现、用户级服务和持久化机制。",
+    "普通用户；受限配置需要 root",
   ),
   linux(
-    "timers",
+    "startup-scripts",
     "persistence",
-    "查看 systemd 定时器",
-    "核查定时器、对应服务以及上次和下次触发时间。",
-    "systemctl list-timers --all --no-pager",
-    "仅适用于 systemd；这是系统管理器的定时器，用户级定时器需另用 systemctl --user 查询。",
+    "查看启动脚本与登录配置",
+    "读取 rc.local、系统 profile 及当前用户的常见 Shell 启动文件。",
+    `FOUND_CONFIG=0
+for CONFIG_FILE in /etc/rc.local /etc/rc.d/rc.local /etc/profile /etc/bash.bashrc "\${HOME:-/root}/.profile" "\${HOME:-/root}/.bashrc"; do
+  if [ -f "$CONFIG_FILE" ]; then
+    FOUND_CONFIG=1
+    printf '\\n--- %s ---\\n' "$CONFIG_FILE"
+    if [ -r "$CONFIG_FILE" ]; then
+      cat "$CONFIG_FILE"
+    else
+      printf '%s\\n' '文件存在但不可读，请核查权限。'
+    fi
+  fi
+done
+if [ "$FOUND_CONFIG" -eq 0 ]; then printf '%s\\n' '未在这些路径发现启动脚本；请核查实际使用的 Shell 和 init 配置。'; fi`,
+    "只读取文件，不使用 source 或执行其中内容。用户配置仅覆盖当前 HOME；不同 Shell、其他账号和 systemd 定时器需另行核查。",
+    "普通用户；其他用户的配置可能需要 root",
   ),
   linux(
     "user-crontab",
     "persistence",
     "查看指定用户 crontab",
-    "核查指定账号设置的周期任务。",
-    'ACCOUNT_NAME=root\nsudo crontab -u "$ACCOUNT_NAME" -l',
-    "将 root 替换为目标账号；需要 cron/Cronie 和 sudo。提示 no crontab 仅表示该账号未配置用户 crontab。",
-    "root；或具备 sudo 权限",
+    "查看当前账号的周期任务；可将账号变量改为需要核查的用户。",
+    `ACCOUNT_NAME=$(id -un) # 可替换为 root 等账号
+if command -v crontab >/dev/null 2>&1; then
+  if [ "$ACCOUNT_NAME" = "$(id -un)" ]; then
+    crontab -l || printf '%s\\n' '未读取到 crontab；可能未配置、没有权限或 cron 不可用，请核对提示。'
+  else
+    crontab -u "$ACCOUNT_NAME" -l || printf '%s\\n' '未读取到该账号 crontab；请核对权限及前面的错误。'
+  fi
+else
+  FOUND_CRON=0
+  for CRON_FILE in "/var/spool/cron/crontabs/$ACCOUNT_NAME" "/var/spool/cron/$ACCOUNT_NAME"; do
+    if [ -f "$CRON_FILE" ]; then
+      FOUND_CRON=1
+      printf '\\n--- %s ---\\n' "$CRON_FILE"
+      if [ -r "$CRON_FILE" ]; then cat "$CRON_FILE"; else printf '%s\\n' '文件不可读，请核查权限。'; fi
+    fi
+  done
+  if [ "$FOUND_CRON" -eq 0 ]; then printf '%s\\n' '没有 crontab 工具，也未在常见 spool 路径发现该账号配置；不能据此排除定时任务。'; fi
+fi`,
+    "优先使用 BusyBox crontab；无工具时读取常见 spool 文件。查看其他账号通常需要 root，不依赖 sudo。",
+    "当前账号可查看自身配置；其他账号通常需要 root",
   ),
   linux(
     "system-cron",
     "persistence",
     "查看系统 cron 配置",
-    "查看系统 crontab、cron.d 配置及周期脚本目录清单。",
-    'sudo cat /etc/crontab\nsudo find /etc/cron.d -maxdepth 1 -type f -exec sh -c \'printf "\\n--- %s ---\\n" "$1"; cat -- "$1"\' sh {} \\;\nsudo ls -la /etc/cron.hourly /etc/cron.daily /etc/cron.weekly /etc/cron.monthly',
-    "目录布局依发行版而异，不存在时会报错；这里只读取配置和列出文件，不运行周期脚本。",
-    "root；或具备 sudo 权限",
+    "读取存在的系统 crontab/cron.d 文件，并列出周期脚本目录。",
+    `for CRON_FILE in /etc/crontab /etc/cron.d/*; do
+  if [ -f "$CRON_FILE" ]; then
+    printf '\\n--- %s ---\\n' "$CRON_FILE"
+    if [ -r "$CRON_FILE" ]; then cat "$CRON_FILE"; else printf '%s\\n' '文件不可读，请核查权限。'; fi
+  fi
+done
+for CRON_DIR in /etc/cron.hourly /etc/cron.daily /etc/cron.weekly /etc/cron.monthly /etc/periodic/*; do
+  if [ -d "$CRON_DIR" ]; then
+    printf '\\n--- %s ---\\n' "$CRON_DIR"
+    ls -la "$CRON_DIR"
+  fi
+done
+printf '%s\\n' '仅展示存在的配置路径；空输出不代表系统没有定时任务。'`,
+    "使用 sh 文件匹配、cat 和 ls；兼顾常见发行版与 Alpine/BusyBox 的 /etc/periodic，不使用 find -maxdepth/-exec，不运行周期脚本。",
+    "普通用户；受限配置需要 root",
   ),
-
   linux(
     "login-success",
     "logs",
     "查看成功登录历史",
-    "查看 wtmp 中保存的登录和重启记录，保留来源地址。",
-    "last -Fai",
-    "需要 util-linux 的 last，依赖 wtmp；部分发行版改用 wtmpdb，日志轮转或缺失会影响覆盖范围。",
+    "在提供 last 的系统上查看最近保存的登录和重启记录。",
+    `if command -v last >/dev/null 2>&1; then
+  if [ -r /var/log/wtmp ]; then
+    last | head -n 50
+  else
+    printf '%s\\n' '没有可读的 /var/log/wtmp；请核对日志路径、读取权限和实际登录留存方式。'
+  fi
+else
+  printf '%s\\n' '没有 last，无法解码 wtmp；请查看认证文本日志或导出日志离线分析。'
+fi`,
+    "不使用 last -Fai 等版本相关参数；兼容常见 BusyBox last。依赖 wtmp 等实际留存记录，精简系统/容器可能没有；输出前 50 行。",
+    "普通用户",
   ),
   linux(
     "login-failure",
     "logs",
-    "查看失败登录历史",
-    "查看 btmp 中保存的失败登录记录。",
-    "sudo lastb -Fai",
-    "需要 util-linux 的 lastb，依赖 btmp；未记录或文件缺失不能证明没有失败登录。",
-    "root；或具备 btmp 读取权限",
+    "查看失败认证记录",
+    "在常见文本日志中查看失败登录和无效账号线索。",
+    `FOUND_LOG=0
+for LOG_FILE in /var/log/auth.log /var/log/secure /var/log/messages /var/log/syslog; do
+  if [ -f "$LOG_FILE" ]; then
+    FOUND_LOG=1
+    printf '\\n--- %s ---\\n' "$LOG_FILE"
+    if [ -r "$LOG_FILE" ]; then
+      grep -E 'Failed password|Failed publickey|Invalid user|authentication failure|Login attempt|Bad password' "$LOG_FILE" | tail -n 100
+    else
+      printf '%s\\n' '日志存在但不可读，请核查权限。'
+    fi
+  fi
+done
+if [ "$FOUND_LOG" -eq 0 ]; then
+  printf '%s\\n' '未发现常见认证文本日志；请核查 syslog/logread 配置及实际日志路径。'
+fi`,
+    "只需 BusyBox grep/tail，不依赖 lastb，也不把二进制 btmp 当文本读取；这里只展示匹配模式的记录，其他认证方式、压缩/轮转日志需另查。",
+    "root 或具有认证日志读取权限",
   ),
   linux(
     "ssh-auth",
     "logs",
     "查看 SSH 认证日志",
-    "在常见认证日志路径中查找 sshd 的登录与认证记录。",
-    "sudo grep -E 'sshd.*(Accepted|Failed|Invalid user|authentication failure)' /var/log/auth.log /var/log/secure",
-    "Debian/Ubuntu 常用 auth.log，RHEL 系常用 secure；不存在的路径会报错。仅使用 journal 的系统可查询 journalctl -t sshd；轮转日志需另行检查。",
-    "root；或具备认证日志读取权限",
+    "在存在的常见日志文件中筛查 sshd/dropbear 记录，缺失时尝试 journal。",
+    `FOUND_LOG=0
+for LOG_FILE in /var/log/auth.log /var/log/secure /var/log/messages /var/log/syslog; do
+  if [ -f "$LOG_FILE" ]; then
+    FOUND_LOG=1
+    printf '\\n--- %s ---\\n' "$LOG_FILE"
+    if [ -r "$LOG_FILE" ]; then
+      grep -E '(sshd|dropbear)' "$LOG_FILE" | tail -n 100
+    else
+      printf '%s\\n' '日志存在但不可读，请核查权限。'
+    fi
+  fi
+done
+if [ "$FOUND_LOG" -eq 0 ]; then
+  if command -v journalctl >/dev/null 2>&1 && [ -d /run/systemd/system ]; then
+    journalctl -t sshd -n 100 --no-pager
+  else
+    printf '%s\\n' '未发现常见认证文本日志，且无可用 journal；请核查日志配置、路径和留存。'
+  fi
+fi`,
+    "主要使用 BusyBox grep -E/tail，不假设 Debian 或 RHEL 路径一定存在；每文件只显示末 100 行匹配项，轮转/压缩日志和其他 SSH 实现需另查。",
+    "root 或具有认证日志读取权限",
   ),
   linux(
-    "journal-range",
+    "system-logs",
     "logs",
-    "查看指定时间段系统日志",
-    "按开始和结束时间查询 systemd journal，输出带时区的时间。",
-    "START_TIME='2026-10-13 00:00:00'\nEND_TIME='2026-10-13 23:59:59'\nsudo journalctl --since \"$START_TIME\" --until \"$END_TIME\" --output=short-iso-precise --no-pager",
-    "替换两个时间值，未指定时区时按目标主机本地时区解释。需要 systemd；较旧版本可改用 short-iso。",
-    "root；或具备 journal 读取权限",
+    "查看最近系统日志",
+    "读取常见系统日志末 100 行，缺失时尝试 BusyBox 内存日志。",
+    `FOUND_LOG=0
+for LOG_FILE in /var/log/messages /var/log/syslog /var/log/kern.log; do
+  if [ -f "$LOG_FILE" ]; then
+    FOUND_LOG=1
+    printf '\\n--- %s ---\\n' "$LOG_FILE"
+    if [ -r "$LOG_FILE" ]; then tail -n 100 "$LOG_FILE"; else printf '%s\\n' '日志存在但不可读，请核查权限。'; fi
+  fi
+done
+if [ "$FOUND_LOG" -eq 0 ]; then
+  if command -v logread >/dev/null 2>&1; then
+    if LOG_OUTPUT=$(logread); then
+      printf '%s\\n' "$LOG_OUTPUT" | tail -n 100
+    else
+      printf '%s\\n' 'logread 未能读取内存日志，请核查 syslogd、日志配置和权限。'
+    fi
+  elif command -v journalctl >/dev/null 2>&1 && [ -d /run/systemd/system ]; then
+    journalctl -n 100 --no-pager
+  else
+    printf '%s\\n' '未发现常见系统日志，也无可用 logread/journal；请核查日志配置、路径及留存。'
+  fi
+fi`,
+    "主要使用 BusyBox tail/logread，不预填固定日期。logread 需配置并运行相应 syslogd；journal 仅作为已运行 systemd 系统的可选回退，不自动安装或启动服务。",
+    "普通用户；受限日志需要 root",
   ),
-
   linux(
     "hash",
     "files",
     "计算文件 SHA256",
-    "计算目标文件摘要，便于证据完整性校验及比对。",
-    "TARGET_PATH='/path/to/sample'\nsha256sum -- \"$TARGET_PATH\"",
-    "替换目标路径；需要 GNU coreutils。只读取文件，哈希本身不能判断恶意性。",
+    "使用 sha256sum 计算文件摘要，核对证据完整性。",
+    `TARGET_PATH='/etc/passwd' # 示例文件，替换为目标文件的绝对路径
+if [ -r "$TARGET_PATH" ]; then
+  if command -v sha256sum >/dev/null 2>&1; then
+    sha256sum "$TARGET_PATH"
+  else
+    printf '%s\\n' '当前工具集未提供 sha256sum，无法计算 SHA256；不要用 cksum/MD5 代替并标为 SHA256。'
+  fi
+else
+  printf '%s\\n' '目标文件不存在或不可读，请替换路径并检查权限。'
+fi`,
+    "sha256sum 是常见 BusyBox applet，但可在构建时被裁剪。先替换绝对路径；哈希本身不能判断文件是否恶意。",
     "对目标文件有读取权限",
   ),
   linux(
     "file-stat",
     "files",
     "查看文件时间与权限",
-    "查看权限、所有者、大小、访问/修改/元数据变更时间及 inode。",
-    "TARGET_PATH='/path/to/sample'\nstat -- \"$TARGET_PATH\"",
-    "替换目标路径；需要 GNU coreutils。ctime 是元数据变更时间，不是文件创建时间。",
+    "查看文件属性；缺少 stat 时回退到数值 UID/GID 与 inode 列表。",
+    `TARGET_PATH='/etc/passwd' # 示例文件，替换为目标文件的绝对路径
+if command -v stat >/dev/null 2>&1; then
+  stat "$TARGET_PATH"
+else
+  ls -ldin "$TARGET_PATH"
+fi`,
+    "使用 BusyBox stat 默认输出，不依赖 GNU 格式模板；ls 回退不能提供完整时间字段。ctime 是元数据变更时间，不是创建时间。",
     "对目标路径有访问权限",
   ),
   linux(
     "recent-files",
     "files",
     "查找近期修改文件",
-    "在指定目录内查找最近一天修改的普通文件。",
-    "SEARCH_ROOT='/path/to/directory'\nsudo find \"$SEARCH_ROOT\" -xdev -type f -mtime -1 -printf '%TY-%Tm-%Td %TH:%TM:%TS %p\\n'",
-    "替换搜索目录；需要 GNU findutils。-xdev 不跨文件系统，-mtime -1 表示最近 24 小时；大目录可能耗时。",
-    "对目标目录有读取权限；示例使用 sudo",
+    "在指定目录内查找最近 24 小时修改的普通文件，不跨文件系统。",
+    `SEARCH_ROOT='/tmp' # 示例目录，替换为要检查的绝对路径
+if [ -d "$SEARCH_ROOT" ]; then
+  find "$SEARCH_ROOT" -xdev -type f -mtime -1 -print
+else
+  printf '%s\\n' '搜索目录不存在，请替换 SEARCH_ROOT。'
+fi`,
+    "使用常见 BusyBox find 支持的选项，不使用 GNU -printf；只输出路径。大目录可能耗时，文件名可含换行，文件时间也可能被修改。",
+    "对目标目录有读取权限；其他目录可能需要 root",
   ),
   linux(
     "copy-logs",
     "files",
     "复制日志留存",
-    "在新建的取证目录中留存指定日志，保留文件属性。",
-    'SOURCE_LOG=\'/var/log/auth.log\'\nEVIDENCE_DIR=\'/path/to/new-evidence-directory\'\nsudo mkdir -m 700 -- "$EVIDENCE_DIR" &&\n  sudo cp -a --no-clobber -- "$SOURCE_LOG" "$EVIDENCE_DIR/"',
-    "替换源日志及新目录路径。需要 GNU coreutils 和 sudo；写入取证目录，不覆盖已有文件；目录已存在时停止。活动日志复制期间可能变化。",
-    "root；或具备源日志读取及目标目录写入权限",
+    "在全新取证目录中复制指定日志，尽量保留时间与权限。",
+    `SOURCE_LOG='/var/log/auth.log' # 替换为存在且可读的源日志
+EVIDENCE_DIR="./evidence-$(date +%Y%m%d-%H%M%S)" # 替换为新的输出目录
+if [ ! -f "$SOURCE_LOG" ] || [ ! -r "$SOURCE_LOG" ]; then
+  printf '%s\\n' '源日志不存在或不可读，请先替换 SOURCE_LOG 并核查权限。'
+elif mkdir -m 700 "$EVIDENCE_DIR"; then
+  if cp -p "$SOURCE_LOG" "$EVIDENCE_DIR/"; then
+    printf '日志已复制到 %s/\\n' "$EVIDENCE_DIR"
+  fi
+fi`,
+    "使用 BusyBox mkdir/cp/date，不依赖 cp --no-clobber 或 sudo。mkdir 不带 -p，目录已存在时停止，因此不覆盖已有文件；cp -p 能否保留所有属性受权限影响，活动日志复制期间仍可能变化。",
+    "源日志读取及目标目录写入权限；保留他人所有权通常需要 root",
   ),
 ];
